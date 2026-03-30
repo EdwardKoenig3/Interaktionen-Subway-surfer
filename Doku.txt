@@ -1,0 +1,39 @@
+Phase 1 – Setup (Woche 1-2)
+
+GitHub Repository einrichten und klonen
+Kinect-Treiber installieren (PyKinect2 für Windows oder libfreenect für Linux)
+Python-Umgebung einrichten (pip install opencv-python pykinect2 pygame pynput)
+Erstes Kamerabild anzeigen lassen und testen ob Kinect erkannt wird
+
+Phase 2 – Gestenerkennung (Woche 3-4)
+
+Körperpunkte (Skeleton Tracking) auslesen
+Gesten definieren und implementieren:
+
+Springen: Hüft-Y-Koordinate steigt schnell
+Ducken: Hüft-Y-Koordinate sinkt
+Links: Hüft-X-Koordinate verschiebt sich nach links
+Rechts: Hüft-X-Koordinate verschiebt sich nach rechts
+
+
+Gesten in Echtzeit testen und Schwellenwerte kalibrieren
+
+Phase 3 – Spielintegration (Woche 5-6)
+
+Gesten mit Tastatureingaben verknüpfen (pynput)
+Subway Surfer im Browser öffnen und mit Gesten steuern
+Latenz messen und optimieren
+
+Phase 4 – Feinschliff (Woche 7-8)
+
+Schwellenwerte optimieren
+Benutzerführung verbessern (Feedback wenn Geste erkannt)
+Präsentation und Demo vorbereiten
+
+Verwendete Technologien:
+
+Python 3.10+
+PyKinect2 (Kinect-Anbindung)
+OpenCV (Kamerabild verarbeiten)
+pygame (optional: eigenes Spiel)
+pynput (Tastatureingaben simulieren)
