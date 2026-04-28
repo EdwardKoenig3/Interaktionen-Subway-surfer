@@ -7,7 +7,8 @@ C_SKIN     = Color(0.941, 0.745, 0.549, 1)
 C_PACK     = Color(0.863, 0.235, 0.235, 1)
 C_GROUND   = Color(0.176, 0.176, 0.176, 1)
 C_LANEMARK = Color(0.784, 0.784, 0.784, 1)
-C_BARRIER  = Color(1.000, 0.510, 0.000, 1)
+C_CAR      = Color(0.180, 0.180, 0.210, 1)
+C_CABIN    = Color(0.110, 0.110, 0.140, 1)
 C_TRAIN    = Color(0.784, 0.118, 0.118, 1)
 C_RAMP     = Color(0.600, 0.220, 0.100, 1)
 C_OVERHEAD = Color(0.200, 0.200, 0.240, 1)
@@ -50,6 +51,12 @@ PLAYER_SY     = 1.0     # Körperhöhe
 PLAYER_HW     = 0.32    # halbe Breite (für Kollision)
 PLAYER_HH     = 0.48    # Faktor × scale_y = halbe Höhe
 
+# ── Auto ──────────────────────────────────────────────────────────────
+CAR_SX   = 2.0
+CAR_SY   = 1.2
+CAR_Y    = 0.6
+CAR_TOP  = CAR_Y + CAR_SY * 0.5   # = 1.2
+
 # ── Zug ───────────────────────────────────────────────────────────────
 TRAIN_SX   = 2.2
 TRAIN_SY   = 2.2
@@ -68,5 +75,5 @@ MAX_LIVES    = 3
 INVINCIBLE   = 2.0    # Sekunden Unverwundbarkeit nach Treffer
 
 # Pushback: deutlich länger & weiter für Gestensteuerung
-PUSHBACK_DUR  = 1.1   # Sekunden für Zurückzieh-Animation
-PUSHBACK_DIST = 7.0   # Einheiten zurück
+PUSHBACK_DUR  = 1.6   # Sekunden für Zurückzieh-Animation
+PUSHBACK_DIST = 12.0  # Einheiten zurück
