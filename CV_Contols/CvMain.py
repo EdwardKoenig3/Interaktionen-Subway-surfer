@@ -1,16 +1,23 @@
+import argparse
 import cv2
 from ultralytics import YOLO
 from pythonosc.udp_client import SimpleUDPClient
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Pose Tracking mit Webcam oder Link to Windows Kamera")
+    parser.add_argument("--camera", type=int, default=0,
+                        help="Kamera-Index: 0=integrierte Webcam, 1=erste externe Kamera, 2=nächste verfügbare Kamera (z.B. Handy)")
+    args = parser.parse_args()
+
     IP = "192.168.137.1"
     PORT = 9000
     client = SimpleUDPClient(IP, PORT)
 
     model = YOLO("yolo26n-pose.pt")
 
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(args.camera)
+    print(f"Verwende Kamera-Index: {args.camera}")
 
     if not cap.isOpened():
         print("Fehler: Webcam konnte nicht geöffnet werden.")
@@ -27,6 +34,7 @@ def main() -> None:
         if not ret:
             break
 
+        frame = cv2.flip(frame, 1)
         h, w = frame.shape[:2]
 
         results = model.predict(frame, conf=0.5, verbose=False)
@@ -84,9 +92,10 @@ def main() -> None:
 
                         # Hocke: Hüfte nahe an Knie
                         if abs(huefte_y - knie_y) < 60:
-                            if zustand != "HOCKT":
+                            if zustand != "SLIDE":
                                 client.send_message("/game/slide", [])
-                            zustand = "HOCKT"
+                                print("/game/slide")
+                            zustand = "SLIDE"
 
                     # Sprung: Füße deutlich höher als normal
                     if (li_knoechel[1] > 0 and re_knoechel[1] > 0):
@@ -94,9 +103,10 @@ def main() -> None:
 
                         # Wenn Füße ungewöhnlich hoch → Sprung
                         if knoechel_y < h * 0.75:
-                            if zustand != "SPRINGT":
+                            if zustand != "JUMP":
                                 client.send_message("/game/jump", [])
-                            zustand = "SPRINGT"
+                                print("/game/jump")
+                            zustand = "JUMP"
                             
 
                     # -------------------
