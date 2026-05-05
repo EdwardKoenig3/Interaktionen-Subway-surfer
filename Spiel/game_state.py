@@ -9,6 +9,7 @@ class GS:
     lives      = MAX_LIVES
     elapsed    = 0.0
     running    = True
+    paused     = True    # startet pausiert bis Enter gedrückt wird
     obs_timer  = 0.0
     coin_timer = 0.0
     inv_timer  = 0.0   # Unverwundbarkeits-Timer
@@ -34,6 +35,7 @@ class GS:
         cls.lives      = MAX_LIVES
         cls.elapsed    = 0.0
         cls.running    = True
+        cls.paused     = True
         cls.obs_timer  = 0.0
         cls.coin_timer = 0.0
         cls.inv_timer  = 0.0

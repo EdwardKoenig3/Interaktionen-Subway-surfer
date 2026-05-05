@@ -12,7 +12,7 @@ class Coin(Entity):
 
     def __init__(self, lane: int, z: float, y: float = 1.0):
         super().__init__(
-            model='sphere', color=C_COIN,
+            model='sphere', texture='textures/coin.png',
             scale=0.35,
             position=(LANES[lane], y, z),
         )

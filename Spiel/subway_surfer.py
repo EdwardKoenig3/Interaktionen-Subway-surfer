@@ -6,7 +6,7 @@ Dateistruktur:
     constants.py    – Farben und Spielkonstanten
     game_state.py   – GS (globaler Spielzustand)
     player.py       – Player (Physik, Steuerung, Pushback)
-    obstacles.py    – Obstacle, TunnelObstacle
+    obstacles.py    – Obstacle (Auto, Zug, Overhead)
     coins.py        – Coin
     world.py        – GroundTile, make_buildings
     hud.py          – HUD-Elemente, update_hearts
@@ -14,11 +14,15 @@ Dateistruktur:
 
 Gesture-Interface:
     player.action_left()   player.action_right()
-    player.action_jump()   player.action_slide()
+    player.action_jump()
+    player.start_slide()   – Slide beginnen (Pose eingenommen)
+    player.stop_slide()    – Slide beenden  (Pose verlassen)
+    player.action_slide()  – Einmaliger Slide ohne Hold (OSC-Fallback)
 """
 
 import random, sys, math
 from ursina import *
+from osc_input import start_osc_server, poll_actions
 
 from constants import (
     C_SKY, C_AMBIENT,
@@ -31,7 +35,7 @@ from constants import (
 )
 from game_state  import GS
 from player      import Player
-from obstacles   import Obstacle, TunnelObstacle
+from obstacles   import Obstacle
 from coins       import Coin
 from world       import GroundTile, make_buildings
 from hud         import create_hud, update_hearts
@@ -39,31 +43,28 @@ from hud         import create_hud, update_hearts
 # ── App ──────────────────────────────────────────────────────────────
 app = Ursina(title='Subway Surfer 3D', vsync=True)
 window.color = C_SKY
-Entity(model='sphere', color=C_SKY, scale=300,
+Entity(model='sphere', texture='textures/sky.png', scale=300,
        double_sided=True, unlit=True, eternal=True)
 
 # ── HUD ──────────────────────────────────────────────────────────────
-hud_score, hud_coins, hud_hint, hud_over, hud_sub, hud_restart, hearts = create_hud()
+hud_score, hud_coins, hud_hint, hud_over, hud_sub, hud_restart, hearts, \
+    hud_pause_bg, hud_pause_title, hud_pause_sub = create_hud()
 
 # ── Globale Listen ────────────────────────────────────────────────────
-obstacles: list[Obstacle]       = []
-tunnels:   list[TunnelObstacle] = []
-coins:     list[Coin]           = []
-tiles:     list[GroundTile]     = []
-player:    Player | None        = None
+obstacles: list[Obstacle] = []
+coins:     list[Coin]     = []
+tiles:     list[GroundTile] = []
+player:    Player | None  = None
 
 
 # ── Spawn ─────────────────────────────────────────────────────────────
 
 def _spawn_obstacle():
     kind = random.choices(
-        ['barrier', 'train', 'overhead', 'tunnel'],
-        weights=[4, 3, 2, 1]
+        ['car', 'train', 'train_long', 'train_xl', 'overhead'],
+        weights=[3, 6, 3, 1, 2]
     )[0]
-    if kind == 'tunnel':
-        tunnels.append(TunnelObstacle())
-    else:
-        obstacles.append(Obstacle(random.randint(0, LANE_COUNT - 1), kind))
+    obstacles.append(Obstacle(random.randint(0, LANE_COUNT - 1), kind))
 
 
 def _spawn_coins():
@@ -90,24 +91,25 @@ def _spawn_coins():
 # ── Kollision ─────────────────────────────────────────────────────────
 
 def _check_collisions():
-    # ── Rampen-Zug: Spieler landet auf dem Dach ───────────────────────
-    # Nur wenn Spieler fällt (vel_y <= 0) und in richtiger Höhe
+    # ── Plattform-Landing: Zug-Dach und Auto-Dach ────────────────────
     if player.is_jumping and player.vel_y <= 0:
         phw, phh = player.half_extents()
         player_bottom = player.y - phh
         for o in obstacles:
-            if o._dead or not o.has_ramp:
+            if o._dead or not o.has_platform:
                 continue
             if abs(o.x - player.x) >= o.hw + phw - 0.05:
                 continue
             if abs(o.z - player.z) >= o.hz + 0.4:
                 continue
-            # Spieler-Boden nahe am Zugdach
-            if player_bottom <= TRAIN_TOP + 0.2 and player_bottom >= TRAIN_TOP - 0.5:
-                player.y          = TRAIN_TOP + phh
+            plat_top  = o.y + o.hh
+            tol_down  = 1.0 if o.has_ramp else 0.5
+            if player_bottom <= plat_top + 0.3 and player_bottom >= plat_top - tol_down:
+                player.y          = plat_top + phh
                 player.vel_y      = 0.0
                 player.is_jumping = False
                 player.platform   = o
+                player._ramp_jump = False
                 break
 
     # ── Körper-Kollision mit Hindernissen ─────────────────────────────
@@ -116,18 +118,17 @@ def _check_collisions():
         for o in obstacles:
             if o._dead:
                 continue
-            # Rampen-Zug: kein Schaden bis der Spieler komplett drüber ist
-            # Solange die Vorderkante des Zuges noch nicht weit hinter dem Spieler ist
-            # und der Spieler in der gleichen Spur → Rampe wird gefahren, kein Schaden
+            # Rampen-Zug: Skip nur für Rampen-Boost oder Boden-Annäherung.
+            # Manuell Springende (_ramp_jump=False) werden normal gecheckt –
+            # hits_body ist dann True wenn sie im Zugkörper sind, False wenn drüber.
             if o.has_ramp and abs(o.x - player.x) < o.hw + 0.5:
-                train_front = o.z - o.hz
-                if train_front > -3.0:   # Zug noch nicht komplett passiert
+                if player.is_jumping and not player._ramp_jump:
+                    pass  # manuell gesprungen → Kollision normal prüfen
+                elif o.z + o.hz > -0.5:
                     continue
             if o.hits_body(player):
                 hit = True
                 break
-        if not hit:
-            hit = any(not t._dead and t.hits_body(player) for t in tunnels)
         if hit:
             GS.lives    -= 1
             GS.inv_timer = INVINCIBLE
@@ -149,7 +150,6 @@ def _check_collisions():
 
     # ── Tote Entities entfernen ───────────────────────────────────────
     obstacles[:] = [o for o in obstacles if not o._dead]
-    tunnels[:]   = [t for t in tunnels   if not t._dead]
     coins[:]     = [c for c in coins     if not c._dead]
 
 
@@ -163,18 +163,16 @@ def _show_game_over():
 
 
 def _reset():
-    global obstacles, tunnels, coins, tiles, player
+    global obstacles, coins, tiles, player
 
     for o in obstacles:
         for d in o._deco: destroy(d)
         destroy(o)
-    for t in tunnels:
-        for w in t._walls: destroy(w)
     for c in coins:  destroy(c)
     for ti in tiles: destroy(ti)
     if player: destroy(player)
 
-    obstacles.clear(); tunnels.clear(); coins.clear(); tiles.clear()
+    obstacles.clear(); coins.clear(); tiles.clear()
 
     GS.reset()
     update_hearts(hearts, MAX_LIVES)
@@ -190,8 +188,23 @@ def _reset():
 
 # ── Haupt-Update ──────────────────────────────────────────────────────
 
+def _set_pause(paused: bool):
+    GS.paused = paused
+    hud_pause_bg.enabled    = paused
+    hud_pause_title.enabled = paused
+    hud_pause_sub.enabled   = paused
+    if paused:
+        # Unterscheide: noch nie gestartet vs. mitten im Spiel pausiert
+        if GS.elapsed == 0.0:
+            hud_pause_title.text = 'SUBWAY SURFER'
+            hud_pause_sub.text   = 'ENTER  –  Starten'
+        else:
+            hud_pause_title.text = 'PAUSE'
+            hud_pause_sub.text   = 'ENTER  –  Weiter'
+
+
 def update():
-    if not GS.running:
+    if not GS.running or GS.paused:
         return
     dt = time.dt
 
@@ -212,9 +225,6 @@ def update():
     # Kamera-Z leicht mit Pushback mitbewegen
     camera.z = lerp(camera.z, -13 + player.z * 0.35, min(10 * dt, 1))
 
-    for t in tunnels:
-        t.update()
-
     GS.obs_timer += dt
     if GS.obs_timer >= GS.obs_interval():
         _spawn_obstacle()
@@ -225,6 +235,7 @@ def update():
         _spawn_coins()
         GS.coin_timer = 0
 
+    poll_actions(player)
     _check_collisions()
 
 
@@ -232,12 +243,23 @@ def update():
 
 def input(key):
     if not GS.running:
-        if key == 'r': _reset()
+        if key == 'r':
+            _reset()
+            _set_pause(True)
         return
-    if key in ('left arrow',  'a'):        player.action_left()
-    if key in ('right arrow', 'd'):        player.action_right()
-    if key in ('up arrow', 'w', 'space'):  player.action_jump()
-    if key in ('down arrow',  's'):        player.action_slide()
+    if key == 'enter':
+        _set_pause(not GS.paused)
+        return
+    if key == 'p':
+        _set_pause(not GS.paused)
+        return
+    if GS.paused:
+        return
+    if key in ('left arrow',  'a'):                 player.action_left()
+    if key in ('right arrow', 'd'):                 player.action_right()
+    if key in ('up arrow', 'w', 'space'):           player.action_jump()
+    if key in ('down arrow', 's'):                  player.start_slide()
+    if key in ('down arrow up', 's up'):            player.stop_slide()
     if key == 'escape':                    sys.exit()
 
 
@@ -251,4 +273,6 @@ AmbientLight(color=C_AMBIENT)
 
 make_buildings()
 _reset()
+_set_pause(True)
+start_osc_server()
 app.run()

@@ -1,14 +1,26 @@
 from ursina import Text, Entity, camera, color, Color
 from constants import C_COIN, MAX_LIVES
 
-_HEART_FONT = 'C:/Windows/Fonts/arialuni.ttf'   # Arial Unicode – hat ♥
+_HEART_RED  = color.red
+_HEART_DEAD = Color(0.25, 0.10, 0.10, 1)
+
+
+def _make_heart(cx: float, cy: float, alive: bool) -> list:
+    """Drei überlappende Quads, die eine Herz-Silhouette ergeben."""
+    c = _HEART_RED if alive else _HEART_DEAD
+    parts = [
+        Entity(parent=camera.ui, model='quad', color=c,
+               scale=(0.052, 0.052), rotation_z=45,
+               position=(cx, cy - 0.006)),
+        Entity(parent=camera.ui, model='quad', color=c,
+               scale=(0.036, 0.036), position=(cx - 0.017, cy + 0.013)),
+        Entity(parent=camera.ui, model='quad', color=c,
+               scale=(0.036, 0.036), position=(cx + 0.017, cy + 0.013)),
+    ]
+    return parts
 
 
 def create_hud():
-    """
-    Erstellt alle HUD-Elemente. Muss NACH Ursina-App-Init aufgerufen werden.
-    Gibt (score, coins, hint, over, sub, restart, hearts) zurück.
-    """
     score   = Text('0',   position=( 0,    0.46), origin=(0, 0),    scale=2.2, color=color.white)
     coins   = Text('$ 0', position=(-0.82, 0.46), origin=(-0.5, 0), scale=1.6, color=C_COIN)
     hint    = Text('A D   Jump (W/Space)   Slide (S)',
@@ -18,34 +30,30 @@ def create_hud():
     sub     = Text('', position=(0,  0.00), origin=(0, 0), scale=1.5, color=color.white)
     restart = Text('', position=(0, -0.12), origin=(0, 0), scale=1.5, color=C_COIN)
 
-    # Herzen: ♥-Symbol mit Arial Unicode, Fallback auf rote Rauten
+    # Jedes "Herz" ist eine Liste von 3 Entity-Parts
     hearts = []
     for i in range(MAX_LIVES):
-        try:
-            h = Text(
-                text='\u2665',          # ♥
-                font=_HEART_FONT,
-                position=(0.56 + i * 0.075, 0.445),
-                origin=(0, 0),
-                scale=2.8,
-                color=color.red,
-            )
-        except Exception:
-            # Fallback: rote Raute (quad rotiert 45°)
-            h = Entity(
-                parent=camera.ui,
-                model='quad',
-                color=color.red,
-                scale=(0.048, 0.048),
-                rotation_z=45,
-                position=(0.56 + i * 0.075, 0.445),
-            )
-        hearts.append(h)
+        cx = 0.56 + i * 0.09
+        cy = 0.445
+        hearts.append(_make_heart(cx, cy, alive=True))
 
-    return score, coins, hint, over, sub, restart, hearts
+    # Pause-Overlay
+    pause_bg = Entity(
+        parent=camera.ui,
+        model='quad',
+        color=Color(0, 0, 0, 0.55),
+        scale=(2, 2),
+        z=1,
+    )
+    pause_title = Text('',  position=(0,  0.08), origin=(0, 0), scale=3.5, color=color.white, z=0)
+    pause_sub   = Text('',  position=(0, -0.06), origin=(0, 0), scale=1.4,
+                        color=Color(0.8, 0.8, 0.8, 1), z=0)
+
+    return score, coins, hint, over, sub, restart, hearts, pause_bg, pause_title, pause_sub
 
 
 def update_hearts(hearts: list, lives: int):
-    """Aktualisiert die Herzanzeige oben rechts."""
-    for i, h in enumerate(hearts):
-        h.color = color.red if i < lives else Color(0.25, 0.10, 0.10, 1)
+    for i, parts in enumerate(hearts):
+        c = _HEART_RED if i < lives else _HEART_DEAD
+        for part in parts:
+            part.color = c
