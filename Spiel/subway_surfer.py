@@ -42,6 +42,18 @@ from hud         import create_hud, update_hearts
 
 # ── App ──────────────────────────────────────────────────────────────
 app = Ursina(title='Subway Surfer 3D', vsync=True)
+
+# Pixel-Art Textur-Filterung: Loader monkey-patchen → alle Texturen nearest-neighbour
+from panda3d.core import SamplerState as _SS
+_orig_load = app.loader.loadTexture
+def _px_load(*a, **kw):
+    t = _orig_load(*a, **kw)
+    if t:
+        t.setMagfilter(_SS.FT_nearest)
+        t.setMinfilter(_SS.FT_nearest)
+    return t
+app.loader.loadTexture = _px_load
+
 window.color = C_SKY
 Entity(model='sphere', texture='textures/sky.png', scale=300,
        double_sided=True, unlit=True, eternal=True)

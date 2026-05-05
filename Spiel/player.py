@@ -4,7 +4,6 @@ from constants import (
     LANES, LANE_COUNT,
     JUMP_VEL, GRAVITY, SLIDE_DUR, LANE_SPD,
     PLAYER_BASE_Y, PLAYER_SY, PLAYER_HW, PLAYER_HH,
-    C_PLAYER, C_SKIN, C_PACK,
     TRAIN_TOP, RAMP_LEN,
     PUSHBACK_DUR, PUSHBACK_DIST,
 )
@@ -25,28 +24,68 @@ class Player(Entity):
 
     def __init__(self):
         super().__init__(
-            model='cube', texture='textures/player.png',
+            model=None,
             scale=(0.7, PLAYER_SY, 0.7),
             position=(0, PLAYER_BASE_Y, 0),
         )
-        self.head = Entity(parent=self, model='sphere', texture='textures/skin.png',
-                           scale=(0.7, 0.7, 0.7), position=(0, 0.58, 0))
-        self.pack = Entity(parent=self, model='cube', texture='textures/backpack.png',
-                           scale=(0.6, 0.5, 0.28), position=(0, 0.05, 0.44))
-
         self.lane          = 1
         self.target_x      = LANES[1]
         self.vel_y         = 0.0
         self.is_jumping    = False
         self.is_sliding    = False
-        self.slide_held    = False    # True solange Slide-Taste gehalten wird
+        self.slide_held    = False
         self.slide_timer   = 0.0
-        self._ramp_jump    = False    # True während Rampen-Sprung für Neigungsanim.
+        self._ramp_jump    = False
         self._base_sy      = PLAYER_SY
         self._base_y       = PLAYER_BASE_Y
-        self.platform      = None     # Zug-Plattform (nur nach Rampen-Landing)
-        self._pb_timer     = 0.0      # Pushback-Timer
-        self.obstacles_ref = []       # wird von main gesetzt
+        self.platform      = None
+        self._pb_timer     = 0.0
+        self.obstacles_ref = []
+        self._planes       = []   # alle visuellen Quad-Entities
+
+        def _box(cx, cy, cz, W, H, D, tex):
+            """6 Quads (je 1 pro Seite) als Kinder dieser Entity."""
+            hw, hh, hd = W/2, H/2, D/2
+            for key, (ox, oy, oz), rot, sw, sh in (
+                ('f',   ( 0,    0,  -hd), (  0,   0, 0), W, H),  # -Z, Kamera-Seite
+                ('b',   ( 0,    0,   hd), (  0, 180, 0), W, H),  # +Z, Laufrichtung
+                ('l',   (-hw,   0,    0), (  0,  90, 0), D, H),  # -X links
+                ('r',   ( hw,   0,    0), (  0, -90, 0), D, H),  # +X rechts
+                ('t',   ( 0,   hh,    0), (-90,   0, 0), W, D),  # +Y oben
+                ('bot', ( 0,  -hh,    0), ( 90,   0, 0), W, D),  # -Y unten
+            ):
+                self._planes.append(Entity(
+                    parent=self, model='quad', double_sided=True,
+                    texture=tex.get(key),
+                    position=(cx + ox, cy + oy, cz + oz),
+                    rotation=rot, scale=(sw, sh, 1),
+                ))
+
+        _box(0, 0.04, 0, 0.80, 0.33, 0.50, {           # Torso
+            'f': 'textures/body_f.png', 'b': 'textures/body_b.png',
+            'l': 'textures/body_l.png', 'r': 'textures/body_r.png',
+            't': 'textures/body_t.png', 'bot': 'textures/body_bot.png',
+        })
+        _box(0, 0.34, 0, 0.60, 0.28, 0.60, {           # Kopf
+            'f': 'textures/head_f.png', 'b': 'textures/head_b.png',
+            'l': 'textures/head_l.png', 'r': 'textures/head_r.png',
+            't': 'textures/head_t.png', 'bot': 'textures/head_bot.png',
+        })
+        _box(-0.20, -0.28, 0, 0.37, 0.31, 0.40, {      # Linkes Bein
+            'f': 'textures/leg_f.png', 'b': 'textures/leg_b.png',
+            'l': 'textures/leg_l.png', 'r': 'textures/leg_r.png',
+            't': 'textures/leg_t.png', 'bot': 'textures/leg_bot.png',
+        })
+        _box(+0.20, -0.28, 0, 0.37, 0.31, 0.40, {      # Rechtes Bein
+            'f': 'textures/leg_f.png', 'b': 'textures/leg_b.png',
+            'l': 'textures/leg_l.png', 'r': 'textures/leg_r.png',
+            't': 'textures/leg_t.png', 'bot': 'textures/leg_bot.png',
+        })
+        _box(0, 0.04, -0.35, 0.55, 0.28, 0.20, {       # Rucksack
+            'f': 'textures/pack_f.png', 'b': 'textures/pack_b.png',
+            'l': 'textures/pack_l.png', 'r': 'textures/pack_r.png',
+            't': 'textures/pack_t.png', 'bot': 'textures/pack_bot.png',
+        })
 
     # ── Öffentliches Interface ────────────────────────────────────────
 
