@@ -2,6 +2,7 @@ import argparse
 import cv2
 from ultralytics import YOLO
 from pythonosc.udp_client import SimpleUDPClient
+import tracker
 
 
 def main() -> None:
@@ -23,11 +24,16 @@ def main() -> None:
         print("Fehler: Webcam konnte nicht geöffnet werden.")
         exit(1)
 
-    print("Tracking läuft. Mit 'q' beenden.")
+    print("Tracking läuft. Mit 'q' beenden. Drücke 'r' für Auswahlmodus.")
 
     cv2.namedWindow("Pose Tracking", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("Pose Tracking", 800, 450)
     position = "MITTE"
+    zustand = "STEHT"
+    selected_person = None
+    selected_position = None
+    selected_reference = None
+    selection_made = False
 
     while True:
         ret, frame = cap.read()
@@ -40,89 +46,41 @@ def main() -> None:
         results = model.predict(frame, conf=0.5, verbose=False)
         annotated = results[0].plot()
 
-        if results[0].keypoints is not None and len(results[0].keypoints.xy) > 0:
-            for person_kpts in results[0].keypoints.xy:
+        persons = tracker.extract_persons(results)
 
-                if len(person_kpts) >= 17:
-                    # Wichtige Punkte
-                    li_huefte = person_kpts[11]
-                    re_huefte = person_kpts[12]
-                    li_knie = person_kpts[13]
-                    re_knie = person_kpts[14]
-                    li_knoechel = person_kpts[15]
-                    re_knoechel = person_kpts[16]
+        if not selection_made:
+            tracker.draw_person_indices(annotated, persons)
+            tracker.draw_selection_prompt(annotated, h, persons)
+            cv2.imshow("Pose Tracking", annotated)
+            key = cv2.waitKey(0) & 0xFF
+            if key == ord('q') or key == 27:
+                break
+            selected = tracker.select_person_by_key(key, persons)
+            if selected is not None:
+                selected_person = selected[0]
+                selected_position = (selected[2], selected[3])
+                selected_reference = tracker.load_player_reference(selected_person)
+                selection_made = True
+                position = "MITTE"
+                zustand = "STEHT"
+                print(f"Spieler {selected_person} ausgewählt")
+                print(f"Verwende Referenz für Spieler {selected_person}: {selected_reference}")
+            continue
 
-                    # Mittelpunkt Hüfte
-                    if li_huefte[0] > 0 and re_huefte[0] > 0:
-                        huefte_x = float((li_huefte[0] + re_huefte[0]) / 2)
-                        huefte_y = float((li_huefte[1] + re_huefte[1]) / 2)
-                    else:
-                        continue
+        if persons:
+            best_person = tracker.find_best_person(persons, selected_position)
+            if best_person is not None:
+                person_kpts, huefte_x, huefte_y = best_person
+                selected_position = (huefte_x, huefte_y)
+                position, zustand = tracker.analyze_person(person_kpts, h, w, client, position, selected_reference)
+                tracker.draw_player_status(annotated, huefte_x, huefte_y, position, zustand)
+        else:
+            tracker.draw_no_person(annotated, h)
 
-                    # -------------------
-                    # 📍 POSITION (Drittel)
-                    # -------------------
-                    if huefte_x < w / 3:
-                        if position != "LINKS":
-                            client.send_message("/game/left", [])
-                            print("/game/left")
-                        position = "LINKS"
-                    elif huefte_x < 2 * w / 3:
-                        if position != "MITTE":
-                            client.send_message("/game/center", [])
-                            print("/game/center")
-                        position = "MITTE"
-                    else:
-                        if position != "RECHTS":
-                            client.send_message("/game/right", [])
-                            print("/game/right")
-                        position = "RECHTS"
-
-
-                    # -------------------
-                    # 🏃 HALTUNG
-                    # -------------------
-                    zustand = "STEHT"
-
-                    if (li_knie[1] > 0 and re_knie[1] > 0 and
-                        li_huefte[1] > 0 and re_huefte[1] > 0):
-
-                        knie_y = (li_knie[1] + re_knie[1]) / 2
-                        huefte_y = (li_huefte[1] + re_huefte[1]) / 2
-
-                        # Hocke: Hüfte nahe an Knie
-                        if abs(huefte_y - knie_y) < 60:
-                            if zustand != "SLIDE":
-                                client.send_message("/game/slide", [])
-                                print("/game/slide")
-                            zustand = "SLIDE"
-
-                    # Sprung: Füße deutlich höher als normal
-                    if (li_knoechel[1] > 0 and re_knoechel[1] > 0):
-                        knoechel_y = (li_knoechel[1] + re_knoechel[1]) / 2
-
-                        # Wenn Füße ungewöhnlich hoch → Sprung
-                        if knoechel_y < h * 0.75:
-                            if zustand != "JUMP":
-                                client.send_message("/game/jump", [])
-                                print("/game/jump")
-                            zustand = "JUMP"
-                            
-
-                    # -------------------
-                    # 🖥️ Ausgabe
-                    # -------------------
-                    text = f"{position} | {zustand}"
-
-                    cv2.putText(
-                        annotated, text,
-                        (int(huefte_x) - 80, int(huefte_y) - 20),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7, (0, 255, 255), 2
-                    )
+        tracker.draw_tracking_help(annotated, h)
+        tracker.draw_selected_player(annotated, selected_person, h)
 
         num = len(results[0].boxes) if results[0].boxes is not None else 0
-
         cv2.putText(
             annotated, f"Personen erkannt: {num}",
             (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
@@ -130,12 +88,20 @@ def main() -> None:
         )
 
         cv2.imshow("Pose Tracking", annotated)
-
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
             break
+        if key == ord('r'):
+            selection_made = False
+            selected_person = None
+            selected_position = None
+            position = "MITTE"
+            zustand = "STEHT"
+            print("Zurück in Auswahlmodus")
 
     cap.release()
     cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     main()
