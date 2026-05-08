@@ -8,11 +8,11 @@ from game_state import GS
 
 
 class GroundTile(Entity):
-    """Scrollende Bodenkachel – wird recycelt wenn sie hinter dem Spieler verschwindet."""
+    """Scrollende Straßenkachel – wird recycelt wenn sie hinter dem Spieler verschwindet."""
 
     def __init__(self, z: float):
         super().__init__(
-            model='cube', texture='textures/ground.png',
+            model='cube', texture='textures/08_road.png',
             texture_scale=(2, 2),
             scale=(9, 0.3, TILE_LEN),
             position=(0, -0.15, z),
@@ -24,6 +24,25 @@ class GroundTile(Entity):
                 scale=(0.03 / 9, 1.1, 0.35 / TILE_LEN),
                 position=(lx / 4.5, 0.52, 0),
             )
+
+    def update(self):
+        if not GS.running:
+            return
+        self.z -= GS.speed * __import__('ursina').time.dt
+        if self.z < DESPAWN_Z:
+            self.z += TILE_COUNT * TILE_LEN
+
+
+class SidewalkTile(Entity):
+    """Bürgersteig-Kachel zwischen Straße und Gebäuden, scrollt wie der Boden."""
+
+    def __init__(self, z: float, side: int):
+        super().__init__(
+            model='cube', texture='textures/09_sidewalk.png',
+            texture_scale=(1, 6),
+            scale=(1.9, 0.4, TILE_LEN),
+            position=(side * 5.45, -0.10, z),
+        )
 
     def update(self):
         if not GS.running:

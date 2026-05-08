@@ -37,7 +37,7 @@ from game_state  import GS
 from player      import Player
 from obstacles   import Obstacle
 from coins       import Coin
-from world       import GroundTile, make_buildings
+from world       import GroundTile, SidewalkTile, make_buildings
 from hud         import create_hud, update_hearts
 
 # ── App ──────────────────────────────────────────────────────────────
@@ -60,7 +60,7 @@ Entity(model='sphere', texture='textures/sky.png', scale=300,
 
 # ── HUD ──────────────────────────────────────────────────────────────
 hud_score, hud_coins, hud_hint, hud_over, hud_sub, hud_restart, hearts, \
-    hud_pause_bg, hud_pause_title, hud_pause_sub = create_hud()
+    hud_pause_bg, hud_pause_title, hud_pause_sub, hud_logo = create_hud()
 
 # ── Globale Listen ────────────────────────────────────────────────────
 obstacles: list[Obstacle] = []
@@ -130,13 +130,13 @@ def _check_collisions():
         for o in obstacles:
             if o._dead:
                 continue
-            # Rampen-Zug: Skip nur für Rampen-Boost oder Boden-Annäherung.
-            # Manuell Springende (_ramp_jump=False) werden normal gecheckt –
-            # hits_body ist dann True wenn sie im Zugkörper sind, False wenn drüber.
+            # Rampen-Zug: in der Boost-Zone übernimmt der Rampen-Boost
+            # (auch im Slide → Slide wird abgebrochen und Spieler hochgeboostet).
+            # Damit kein "durch die Treppe sliden + Schaden".
             if o.has_ramp and abs(o.x - player.x) < o.hw + 0.5:
-                if player.is_jumping and not player._ramp_jump:
-                    pass  # manuell gesprungen → Kollision normal prüfen
-                elif o.z + o.hz > -0.5:
+                train_front = o.z - o.hz
+                in_ramp_zone = 0.3 <= train_front <= 3.3
+                if player._ramp_jump or in_ramp_zone:
                     continue
             if o.hits_body(player):
                 hit = True
@@ -159,6 +159,10 @@ def _check_collisions():
             GS.coins += 1
             destroy(c)
             coins.remove(c)
+            # Alle 50 Münzen → 1 Herz zurück (gedeckelt bei MAX_LIVES)
+            if GS.coins % 50 == 0 and GS.lives < MAX_LIVES:
+                GS.lives += 1
+                update_hearts(hearts, GS.lives)
 
     # ── Tote Entities entfernen ───────────────────────────────────────
     obstacles[:] = [o for o in obstacles if not o._dead]
@@ -195,24 +199,32 @@ def _reset():
     player.obstacles_ref = obstacles   # Referenz für Wandkollision
 
     for i in range(TILE_COUNT):
-        tiles.append(GroundTile(i * TILE_LEN - TILE_LEN))
+        z = i * TILE_LEN - TILE_LEN
+        tiles.append(GroundTile(z))
+        tiles.append(SidewalkTile(z, -1))
+        tiles.append(SidewalkTile(z, +1))
 
 
 # ── Haupt-Update ──────────────────────────────────────────────────────
 
 def _set_pause(paused: bool):
     GS.paused = paused
-    hud_pause_bg.enabled    = paused
-    hud_pause_title.enabled = paused
-    hud_pause_sub.enabled   = paused
+    hud_pause_bg.enabled  = paused
+    hud_pause_sub.enabled = paused
+    hud_logo.enabled      = paused
     if paused:
         # Unterscheide: noch nie gestartet vs. mitten im Spiel pausiert
         if GS.elapsed == 0.0:
-            hud_pause_title.text = 'SUBWAY SURFER'
-            hud_pause_sub.text   = 'ENTER  –  Starten'
+            # Start-Bildschirm: Logo zeigt den Titel, kein zusätzlicher Text
+            hud_pause_title.enabled = False
+            hud_pause_title.text    = ''
+            hud_pause_sub.text      = 'ENTER  –  Starten'
         else:
-            hud_pause_title.text = 'PAUSE'
-            hud_pause_sub.text   = 'ENTER  –  Weiter'
+            hud_pause_title.enabled = True
+            hud_pause_title.text    = 'PAUSE'
+            hud_pause_sub.text      = 'ENTER  –  Weiter'
+    else:
+        hud_pause_title.enabled = False
 
 
 def update():

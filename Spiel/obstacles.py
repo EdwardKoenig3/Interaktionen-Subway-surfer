@@ -42,10 +42,11 @@ class Obstacle(Entity):
         else:
             sz = d['sz']
 
-        # Entity aufbauen — Auto bekommt Vollfarbe, Rest Textur
+        # Entity aufbauen — Auto = unsichtbarer Träger (texturierte Quads als _deco),
+        # Train/Overhead = Würfel mit Wandtextur.
         if base_kind == 'car':
             super().__init__(
-                model='cube', color=C_CAR,
+                model=None,
                 scale=(d['sx'], d['sy'], sz),
                 position=(LANES[lane], d['y'], SPAWN_Z),
             )
@@ -111,29 +112,47 @@ class Obstacle(Entity):
             self._deco.append(face)
 
     def _build_car(self, lane: int, sz: float):
-        car_top_y = CAR_Y + CAR_SY * 0.5
+        # Atlas-Layout (3×2, identisch zum Spieler):
+        #   obere Reihe:  [f (-Z)] [b (+Z)] [r (+X)]
+        #   untere Reihe: [l (-X)] [t (+Y)] [bot (-Y)]
+        UV = {
+            'f':   (0,    0.5),
+            'b':   (1/3,  0.5),
+            'r':   (2/3,  0.5),
+            'l':   (0,    0),
+            't':   (1/3,  0),
+            'bot': (2/3,  0),
+        }
+        def _add_box(cx, cy, cz, W, H, D, atlas):
+            """Texturierter Quader aus 6 Quads – nutzt den 3×2-Atlas pro Seite."""
+            hw, hh, hd = W/2, H/2, D/2
+            for key, (ox, oy, oz), rot, sw, sh in (
+                ('f',   ( 0,   0,  -hd), (  0,   0, 0), W, H),
+                ('b',   ( 0,   0,   hd), (  0, 180, 0), W, H),
+                ('l',   (-hw,  0,    0), (  0,  90, 0), D, H),
+                ('r',   ( hw,  0,    0), (  0, -90, 0), D, H),
+                ('t',   ( 0,  hh,    0), (-90,   0, 0), W, D),
+                ('bot', ( 0, -hh,    0), ( 90,   0, 0), W, D),
+            ):
+                u, v = UV[key]
+                self._deco.append(Entity(
+                    model='quad', double_sided=True,
+                    texture=atlas,
+                    texture_scale=(1/3, 0.5),
+                    texture_offset=(u, v),
+                    position=(cx + ox, cy + oy, cz + oz),
+                    rotation=rot, scale=(sw, sh, 1),
+                ))
 
-        # Kabine (oberer Aufbau)
-        cabin = Entity(model='cube', color=C_CABIN,
-                       scale=(CAR_SX * 0.75, CAR_SY * 0.45, sz * 0.52),
-                       position=(LANES[lane], car_top_y + CAR_SY * 0.22, SPAWN_Z))
-        self._deco.append(cabin)
-
-        # Scheinwerfer vorne
-        for side in (-0.55, 0.55):
-            hl = Entity(model='cube', color=ursina_color.rgb(240, 230, 160),
-                        scale=(0.28, 0.14, 0.06),
-                        position=(LANES[lane] + side, car_top_y - CAR_SY * 0.18,
-                                  SPAWN_Z - sz * 0.5 - 0.03))
-            self._deco.append(hl)
-
-        # Rücklichter hinten
-        for side in (-0.55, 0.55):
-            rl = Entity(model='cube', color=ursina_color.rgb(220, 40, 40),
-                        scale=(0.28, 0.14, 0.06),
-                        position=(LANES[lane] + side, car_top_y - CAR_SY * 0.18,
-                                  SPAWN_Z + sz * 0.5 + 0.03))
-            self._deco.append(rl)
+        cx, cy, cz = LANES[lane], CAR_Y, SPAWN_Z
+        # Karosserie (unten)
+        _add_box(cx, cy, cz, CAR_SX, CAR_SY, sz, 'textures/07_car.png')
+        # Kabine (oben): schmaler, kürzer, eigene Textur mit Scheiben/Dach
+        cab_W = CAR_SX * 0.78
+        cab_H = CAR_SY * 0.60
+        cab_D = sz * 0.55
+        cab_y = cy + CAR_SY * 0.5 + cab_H * 0.5
+        _add_box(cx, cab_y, cz, cab_W, cab_H, cab_D, 'textures/07b_car_cabin.png')
 
     def _build_overhead(self, lane: int):
         for side in [-1.3, 1.3]:

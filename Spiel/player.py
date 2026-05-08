@@ -43,8 +43,20 @@ class Player(Entity):
         self.obstacles_ref = []
         self._planes       = []   # alle visuellen Quad-Entities
 
-        def _box(cx, cy, cz, W, H, D, tex):
-            """6 Quads (je 1 pro Seite) als Kinder dieser Entity."""
+        # Atlas-Layout (3 Spalten × 2 Zeilen, v=0 unten):
+        #   obere Reihe:  [f (-Z, Kamera)] [b (+Z, Laufrichtung)] [r (+X)]
+        #   untere Reihe: [l (-X)]         [t (+Y oben)]          [bot (-Y unten)]
+        UV = {
+            'f':   (0,    0.5),
+            'b':   (1/3,  0.5),
+            'r':   (2/3,  0.5),
+            'l':   (0,    0),
+            't':   (1/3,  0),
+            'bot': (2/3,  0),
+        }
+
+        def _box(cx, cy, cz, W, H, D, atlas):
+            """6 Quads (je 1 pro Seite) als Kinder, aus einem 3×2 Atlas."""
             hw, hh, hd = W/2, H/2, D/2
             for key, (ox, oy, oz), rot, sw, sh in (
                 ('f',   ( 0,    0,  -hd), (  0,   0, 0), W, H),  # -Z, Kamera-Seite
@@ -54,38 +66,21 @@ class Player(Entity):
                 ('t',   ( 0,   hh,    0), (-90,   0, 0), W, D),  # +Y oben
                 ('bot', ( 0,  -hh,    0), ( 90,   0, 0), W, D),  # -Y unten
             ):
+                u, v = UV[key]
                 self._planes.append(Entity(
                     parent=self, model='quad', double_sided=True,
-                    texture=tex.get(key),
+                    texture=atlas,
+                    texture_scale=(1/3, 0.5),
+                    texture_offset=(u, v),
                     position=(cx + ox, cy + oy, cz + oz),
                     rotation=rot, scale=(sw, sh, 1),
                 ))
 
-        _box(0, 0.04, 0, 0.80, 0.33, 0.50, {           # Torso
-            'f': 'textures/body_f.png', 'b': 'textures/body_b.png',
-            'l': 'textures/body_l.png', 'r': 'textures/body_r.png',
-            't': 'textures/body_t.png', 'bot': 'textures/body_bot.png',
-        })
-        _box(0, 0.34, 0, 0.60, 0.28, 0.60, {           # Kopf
-            'f': 'textures/head_f.png', 'b': 'textures/head_b.png',
-            'l': 'textures/head_l.png', 'r': 'textures/head_r.png',
-            't': 'textures/head_t.png', 'bot': 'textures/head_bot.png',
-        })
-        _box(-0.20, -0.28, 0, 0.37, 0.31, 0.40, {      # Linkes Bein
-            'f': 'textures/leg_f.png', 'b': 'textures/leg_b.png',
-            'l': 'textures/leg_l.png', 'r': 'textures/leg_r.png',
-            't': 'textures/leg_t.png', 'bot': 'textures/leg_bot.png',
-        })
-        _box(+0.20, -0.28, 0, 0.37, 0.31, 0.40, {      # Rechtes Bein
-            'f': 'textures/leg_f.png', 'b': 'textures/leg_b.png',
-            'l': 'textures/leg_l.png', 'r': 'textures/leg_r.png',
-            't': 'textures/leg_t.png', 'bot': 'textures/leg_bot.png',
-        })
-        _box(0, 0.04, -0.35, 0.55, 0.28, 0.20, {       # Rucksack
-            'f': 'textures/pack_f.png', 'b': 'textures/pack_b.png',
-            'l': 'textures/pack_l.png', 'r': 'textures/pack_r.png',
-            't': 'textures/pack_t.png', 'bot': 'textures/pack_bot.png',
-        })
+        _box(0,     0.04,   0,    0.80, 0.33, 0.50, 'textures/01_torso.png')
+        _box(0,     0.34,   0,    0.60, 0.28, 0.60, 'textures/02_head.png')
+        _box(-0.20, -0.28,  0,    0.37, 0.31, 0.40, 'textures/03_legs.png')
+        _box(+0.20, -0.28,  0,    0.37, 0.31, 0.40, 'textures/03_legs.png')
+        _box(0,     0.04,  -0.35, 0.55, 0.28, 0.20, 'textures/04_backpack.png')
 
     # ── Öffentliches Interface ────────────────────────────────────────
 
@@ -200,17 +195,26 @@ class Player(Entity):
 
         # ── Rampen-Boost ──────────────────────────────────────────────
         # Wenn die Vorderkante eines Rampen-Zugs nahe ist, Spieler nach oben boosten.
-        # Platform wird NICHT hier gesetzt – erst wenn der Spieler wirklich oben landet.
-        if not self.is_jumping and not self.is_sliding and self.platform is None:
+        # Funktioniert in jedem Zustand (Laufen, Springen, Sliden):
+        # die Treppe ist immer der Weg nach oben – kein Schaden, kein Phasen.
+        if self.platform is None and not self._ramp_jump:
             for o in self.obstacles_ref:
                 if o._dead or not o.has_ramp:
                     continue
                 train_front = o.z - o.hz
                 if 0.3 <= train_front <= RAMP_LEN + 0.8:
                     if abs(o.x - self.x) < o.hw + 0.35:
+                        # Slide automatisch abbrechen, sonst startet der Sprung
+                        # aus geduckter Pose und erreicht das Zugdach nicht.
+                        if self.is_sliding:
+                            self.is_sliding  = False
+                            self.slide_held  = False
+                            self.slide_timer = 0.0
+                            self.scale_y     = self._base_sy
+                            self.y           = self._base_y
                         target_top = TRAIN_TOP + self.scale_y * 0.5
                         v = math.sqrt(2 * abs(GRAVITY) * max(target_top - self.y, 0.1))
-                        self.vel_y      = v
+                        self.vel_y      = max(self.vel_y, v)
                         self.is_jumping = True
                         self._ramp_jump = True
                         break
