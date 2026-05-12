@@ -30,6 +30,7 @@ def main() -> None:
     cv2.resizeWindow("Pose Tracking", 800, 450)
     position = "MITTE"
     zustand = "STEHT"
+    last_zustand = "STEHT"
     selected_person = None
     selected_position = None
     selected_reference = None
@@ -60,21 +61,32 @@ def main() -> None:
                 selected_person = selected[0]
                 selected_position = (selected[2], selected[3])
                 selected_reference = tracker.load_player_reference(selected_person)
+                # Nasenhöhe-Referenz zurücksetzen, um sie neu zu messen
+                selected_reference["nose_y"] = None
                 selection_made = True
                 position = "MITTE"
                 zustand = "STEHT"
+                last_zustand = "STEHT"
                 print(f"Spieler {selected_person} ausgewählt")
                 print(f"Verwende Referenz für Spieler {selected_person}: {selected_reference}")
             continue
 
-        if persons:
+        if persons and selected_position is not None:
             best_person = tracker.find_best_person(persons, selected_position)
             if best_person is not None:
                 person_kpts, huefte_x, huefte_y = best_person
                 selected_position = (huefte_x, huefte_y)
-                position, zustand = tracker.analyze_person(person_kpts, h, w, client, position, selected_reference)
+                
+                # Nasenhöhe beim ersten Frame speichern, falls noch nicht vorhanden
+                if selected_reference.get("nose_y") is None and person_kpts[0][1] > 0:
+                    selected_reference["nose_y"] = float(person_kpts[0][1])
+                    tracker.save_player_reference(selected_person, selected_reference)
+                    print(f"Nasenhöhe-Referenz für Spieler {selected_person} gespeichert: {selected_reference['nose_y']:.1f}")
+                
+                position, zustand = tracker.analyze_person(person_kpts, h, w, client, position, selected_reference, last_zustand)
+                last_zustand = zustand
                 tracker.draw_player_status(annotated, huefte_x, huefte_y, position, zustand)
-        else:
+        elif not persons:
             tracker.draw_no_person(annotated, h)
 
         tracker.draw_tracking_help(annotated, h)
@@ -97,6 +109,8 @@ def main() -> None:
             selected_position = None
             position = "MITTE"
             zustand = "STEHT"
+            last_zustand = "STEHT"
+            selected_reference = None
             print("Zurück in Auswahlmodus")
 
     cap.release()
