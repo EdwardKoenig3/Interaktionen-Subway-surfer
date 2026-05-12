@@ -140,6 +140,17 @@ class Player(Entity):
         self.slide_held  = False
         self.slide_timer = 0.0
 
+    def action_stand(self):
+        """Neutralpose-Signal (für Gestensteuerung).
+
+        Reale Bewegungen sind kürzer als die in-Game-Animationen:
+        Slide ist zeitbasiert (SLIDE_DUR), Sprung impulsbasiert. Beide laufen
+        immer vollständig durch. Diese Methode bricht sie deshalb NICHT mehr ab –
+        ein nachfolgendes /game/stand vom Sender wird absichtlich ignoriert,
+        damit ein voller Spielsprung / 1.5 s Slide stattfindet.
+        """
+        return
+
     def pushback(self):
         """Startet die Zurückzieh-Animation nach einer Kollision."""
         self._pb_timer = PUSHBACK_DUR

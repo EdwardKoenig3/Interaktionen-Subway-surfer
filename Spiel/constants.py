@@ -44,7 +44,7 @@ SPEED_INC   = 0.002
 # Spieler-Boden max = 0.75 + 1.5625 - 0.48 = 1.83 < Zug-Top 2.2  ✓
 JUMP_VEL      = 7.5
 GRAVITY       = -18.0
-SLIDE_DUR     = 0.65
+SLIDE_DUR     = 1.5
 LANE_SPD      = 18.0
 PLAYER_BASE_Y = 0.75
 PLAYER_SY     = 1.0     # Körperhöhe

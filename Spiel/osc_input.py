@@ -7,6 +7,7 @@ OSC-Adressen:
     /game/lane/right    → Spieler in rechte Spur
     /game/jump          → Springen
     /game/slide         → Sliden
+    /game/stand         → Neutralpose (Slide beenden / Sprung abbrechen)
 
 Beispiel-Sender:
     from pythonosc.udp_client import SimpleUDPClient
@@ -57,6 +58,7 @@ def start_osc_server() -> bool:
     dispatcher.map("/game/right",  _lane(2))
     dispatcher.map("/game/jump",        _action("jump"))
     dispatcher.map("/game/slide",       _action("slide"))
+    dispatcher.map("/game/stand",       _action("stand"))
     dispatcher.set_default_handler(lambda addr, *a: print(f"[OSC] (unbekannt) {addr}  {list(a)}"))
 
     try:
@@ -67,11 +69,22 @@ def start_osc_server() -> bool:
 
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print(f"[OSC] Server läuft auf {OSC_IP}:{OSC_PORT}")
-    print("[OSC] Adressen: /game/lane/left  /game/lane/center  /game/lane/right  /game/jump  /game/slide")
+    print("[OSC] Adressen: /game/left  /game/center  /game/right  /game/jump  /game/slide  /game/stand")
     return True
 
 
 def poll_actions(player) -> None:
+    """OSC-Aktionen anwenden.
+
+    Slide und Sprung sind beide zeitbasiert/impulsbasiert und laufen vollständig
+    durch — eine reale Geste ist kürzer als die in-Game-Animation, deshalb wird
+    sie NICHT durch nachfolgende OSC-Events abgebrochen.
+
+      • /game/slide  → 1.5 s Slide (SLIDE_DUR), läuft ab unabhängig von /game/stand
+      • /game/jump   → ein voller Sprung (Impuls + Gravitation)
+      • Spurwechsel funktioniert während des Slides (keine Slide-Unterbrechung).
+      • /game/stand  → no-op solange Spieler in Aktion (Slide/Sprung läuft aus).
+    """
     while not action_queue.empty():
         try:
             msg = action_queue.get_nowait()
@@ -79,11 +92,20 @@ def poll_actions(player) -> None:
             break
         kind = msg[0]
         if kind == "lane":
-            player.stop_slide()   # aufstehen wenn Spur gewechselt wird
+            # WICHTIG: Slide NICHT abbrechen — Spieler darf während Slide die
+            # Spur wechseln.
             player.set_lane(msg[1])
         elif kind == "action":
             if msg[1] == "jump":
-                player.stop_slide()   # aufstehen beim Springen
+                # Slide nur abbrechen wenn aktiv ein Sprung gewünscht ist
+                # (Sprung hat Vorrang vor laufendem Slide).
+                player.stop_slide()
                 player.action_jump()
             if msg[1] == "slide":
-                player.start_slide()  # bleibt geduckt bis anderer Input kommt
+                # Zeitbasierter Slide: läuft SLIDE_DUR Sekunden, nicht durch
+                # /game/stand unterbrechbar.
+                player.action_slide()
+            if msg[1] == "stand":
+                # In aktiver Aktion: ignorieren, Animation läuft aus.
+                # Methode existiert weiterhin als Sicherheits-Fallback.
+                player.action_stand()
