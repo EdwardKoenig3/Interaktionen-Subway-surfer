@@ -1,21 +1,51 @@
 import argparse
 import cv2
+import torch
 from ultralytics import YOLO
 from pythonosc.udp_client import SimpleUDPClient
 import tracker
+
+
+def _pick_device(override: str) -> str:
+    """Wählt Gerät für YOLO. Default: cuda wenn verfügbar, sonst cpu."""
+    if override != "auto":
+        return override
+    if torch.cuda.is_available():
+        return "cuda:0"
+    return "cpu"
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Pose Tracking mit Webcam oder Link to Windows Kamera")
     parser.add_argument("--camera", type=int, default=0,
                         help="Kamera-Index: 0=integrierte Webcam, 1=erste externe Kamera, 2=nächste verfügbare Kamera (z.B. Handy)")
+    parser.add_argument("--device", type=str, default="auto",
+                        help="Inference-Gerät: 'auto' (default), 'cuda:0', 'cpu'")
     args = parser.parse_args()
 
     IP = "192.168.137.1"
     PORT = 9000
     client = SimpleUDPClient(IP, PORT)
 
+    device = _pick_device(args.device)
+    print(f"PyTorch: {torch.__version__} | CUDA verfügbar: {torch.cuda.is_available()}")
+    if device.startswith("cuda"):
+        try:
+            idx = int(device.split(":")[1]) if ":" in device else 0
+            print(f"Verwende GPU: {torch.cuda.get_device_name(idx)} "
+                  f"(Compute Capability {torch.cuda.get_device_capability(idx)})")
+        except Exception as e:
+            print(f"GPU-Info konnte nicht gelesen werden: {e}")
+    else:
+        print("Verwende CPU.")
+
     model = YOLO("yolo26n-pose.pt")
+    try:
+        model.to(device)
+    except Exception as e:
+        print(f"Konnte Modell nicht auf {device} laden ({e}) – fallback auf CPU.")
+        device = "cpu"
+        model.to(device)
 
     cap = cv2.VideoCapture(args.camera)
     print(f"Verwende Kamera-Index: {args.camera}")
@@ -44,7 +74,7 @@ def main() -> None:
         frame = cv2.flip(frame, 1)
         h, w = frame.shape[:2]
 
-        results = model.predict(frame, conf=0.5, verbose=False)
+        results = model.predict(frame, conf=0.5, verbose=False, device=device)
         annotated = results[0].plot()
 
         persons = tracker.extract_persons(results)
