@@ -1,21 +1,51 @@
 import argparse
 import cv2
+import torch
 from ultralytics import YOLO
 from pythonosc.udp_client import SimpleUDPClient
 import tracker
+
+
+def _pick_device(override: str) -> str:
+    """Wählt Gerät für YOLO. Default: cuda wenn verfügbar, sonst cpu."""
+    if override != "auto":
+        return override
+    if torch.cuda.is_available():
+        return "cuda:0"
+    return "cpu"
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Pose Tracking mit Webcam oder Link to Windows Kamera")
     parser.add_argument("--camera", type=int, default=0,
                         help="Kamera-Index: 0=integrierte Webcam, 1=erste externe Kamera, 2=nächste verfügbare Kamera (z.B. Handy)")
+    parser.add_argument("--device", type=str, default="auto",
+                        help="Inference-Gerät: 'auto' (default), 'cuda:0', 'cpu'")
     args = parser.parse_args()
 
     IP = "192.168.137.1"
     PORT = 9000
     client = SimpleUDPClient(IP, PORT)
 
+    device = _pick_device(args.device)
+    print(f"PyTorch: {torch.__version__} | CUDA verfügbar: {torch.cuda.is_available()}")
+    if device.startswith("cuda"):
+        try:
+            idx = int(device.split(":")[1]) if ":" in device else 0
+            print(f"Verwende GPU: {torch.cuda.get_device_name(idx)} "
+                  f"(Compute Capability {torch.cuda.get_device_capability(idx)})")
+        except Exception as e:
+            print(f"GPU-Info konnte nicht gelesen werden: {e}")
+    else:
+        print("Verwende CPU.")
+
     model = YOLO("yolo26n-pose.pt")
+    try:
+        model.to(device)
+    except Exception as e:
+        print(f"Konnte Modell nicht auf {device} laden ({e}) – fallback auf CPU.")
+        device = "cpu"
+        model.to(device)
 
     cap = cv2.VideoCapture(args.camera)
     print(f"Verwende Kamera-Index: {args.camera}")
@@ -30,6 +60,7 @@ def main() -> None:
     cv2.resizeWindow("Pose Tracking", 800, 450)
     position = "MITTE"
     zustand = "STEHT"
+    last_zustand = "STEHT"
     selected_person = None
     selected_position = None
     selected_reference = None
@@ -43,7 +74,7 @@ def main() -> None:
         frame = cv2.flip(frame, 1)
         h, w = frame.shape[:2]
 
-        results = model.predict(frame, conf=0.5, verbose=False)
+        results = model.predict(frame, conf=0.5, verbose=False, device=device)
         annotated = results[0].plot()
 
         persons = tracker.extract_persons(results)
@@ -60,21 +91,32 @@ def main() -> None:
                 selected_person = selected[0]
                 selected_position = (selected[2], selected[3])
                 selected_reference = tracker.load_player_reference(selected_person)
+                # Nasenhöhe-Referenz zurücksetzen, um sie neu zu messen
+                selected_reference["nose_y"] = None
                 selection_made = True
                 position = "MITTE"
                 zustand = "STEHT"
+                last_zustand = "STEHT"
                 print(f"Spieler {selected_person} ausgewählt")
                 print(f"Verwende Referenz für Spieler {selected_person}: {selected_reference}")
             continue
 
-        if persons:
+        if persons and selected_position is not None:
             best_person = tracker.find_best_person(persons, selected_position)
             if best_person is not None:
                 person_kpts, huefte_x, huefte_y = best_person
                 selected_position = (huefte_x, huefte_y)
-                position, zustand = tracker.analyze_person(person_kpts, h, w, client, position, selected_reference)
+                
+                # Nasenhöhe beim ersten Frame speichern, falls noch nicht vorhanden
+                if selected_reference.get("nose_y") is None and person_kpts[0][1] > 0:
+                    selected_reference["nose_y"] = float(person_kpts[0][1])
+                    tracker.save_player_reference(selected_person, selected_reference)
+                    print(f"Nasenhöhe-Referenz für Spieler {selected_person} gespeichert: {selected_reference['nose_y']:.1f}")
+                
+                position, zustand = tracker.analyze_person(person_kpts, h, w, client, position, selected_reference, last_zustand)
+                last_zustand = zustand
                 tracker.draw_player_status(annotated, huefte_x, huefte_y, position, zustand)
-        else:
+        elif not persons:
             tracker.draw_no_person(annotated, h)
 
         tracker.draw_tracking_help(annotated, h)
@@ -97,6 +139,8 @@ def main() -> None:
             selected_position = None
             position = "MITTE"
             zustand = "STEHT"
+            last_zustand = "STEHT"
+            selected_reference = None
             print("Zurück in Auswahlmodus")
 
     cap.release()
