@@ -21,6 +21,12 @@ def main() -> None:
                         help="Kamera-Index: 0=integrierte Webcam, 1=erste externe Kamera, 2=nächste verfügbare Kamera (z.B. Handy)")
     parser.add_argument("--device", type=str, default="auto",
                         help="Inference-Gerät: 'auto' (default), 'cuda:0', 'cpu'")
+    parser.add_argument("--imgsz", type=int, default=960,
+                        help="YOLO-Inferenzauflösung (höher = genauer, langsamer). Default 960.")
+    parser.add_argument("--cam-width", type=int, default=1280,
+                        help="Kamera-Aufnahmebreite in Pixeln. Default 1280.")
+    parser.add_argument("--cam-height", type=int, default=720,
+                        help="Kamera-Aufnahmehöhe in Pixeln. Default 720.")
     args = parser.parse_args()
 
     IP = "192.168.137.1"
@@ -48,16 +54,22 @@ def main() -> None:
         model.to(device)
 
     cap = cv2.VideoCapture(args.camera)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  args.cam_width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.cam_height)
     print(f"Verwende Kamera-Index: {args.camera}")
 
     if not cap.isOpened():
         print("Fehler: Webcam konnte nicht geöffnet werden.")
         exit(1)
 
+    real_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    real_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    print(f"Kameraauflösung: {real_w}x{real_h} | YOLO imgsz: {args.imgsz}")
+
     print("Tracking läuft. Mit 'q' beenden. Drücke 'r' für Auswahlmodus.")
 
     cv2.namedWindow("Pose Tracking", cv2.WINDOW_NORMAL)
-    cv2.resizeWindow("Pose Tracking", 800, 450)
+    cv2.resizeWindow("Pose Tracking", 1920, 1080)
     position = "MITTE"
     zustand = "STEHT"
     last_zustand = "STEHT"
@@ -74,7 +86,7 @@ def main() -> None:
         frame = cv2.flip(frame, 1)
         h, w = frame.shape[:2]
 
-        results = model.predict(frame, conf=0.5, verbose=False, device=device)
+        results = model.predict(frame, conf=0.5, verbose=False, device=device, imgsz=args.imgsz)
         annotated = results[0].plot()
 
         persons = tracker.extract_persons(results)
@@ -91,8 +103,9 @@ def main() -> None:
                 selected_person = selected[0]
                 selected_position = (selected[2], selected[3])
                 selected_reference = tracker.load_player_reference(selected_person)
-                # Nasenhöhe-Referenz zurücksetzen, um sie neu zu messen
+                # Nasenhöhe + Körperhöhe zurücksetzen, um sie neu zu messen
                 selected_reference["nose_y"] = None
+                selected_reference["body_height"] = None
                 selection_made = True
                 position = "MITTE"
                 zustand = "STEHT"
@@ -107,11 +120,16 @@ def main() -> None:
                 person_kpts, huefte_x, huefte_y = best_person
                 selected_position = (huefte_x, huefte_y)
                 
-                # Nasenhöhe beim ersten Frame speichern, falls noch nicht vorhanden
+                # Nasen- + Körperhöhe beim ersten Frame im Stand kalibrieren
                 if selected_reference.get("nose_y") is None and person_kpts[0][1] > 0:
                     selected_reference["nose_y"] = float(person_kpts[0][1])
+                    body_h = tracker.measure_body_height(person_kpts)
+                    if body_h:
+                        selected_reference["body_height"] = body_h
                     tracker.save_player_reference(selected_person, selected_reference)
-                    print(f"Nasenhöhe-Referenz für Spieler {selected_person} gespeichert: {selected_reference['nose_y']:.1f}")
+                    bh_txt = f"{body_h:.1f}" if body_h else "n/a (Knöchel nicht sichtbar → Pixel-Fallback)"
+                    print(f"Kalibriert Spieler {selected_person}: "
+                          f"nose_y={selected_reference['nose_y']:.1f}, body_height={bh_txt}")
                 
                 position, zustand = tracker.analyze_person(person_kpts, h, w, client, position, selected_reference, last_zustand)
                 last_zustand = zustand

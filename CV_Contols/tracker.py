@@ -1,5 +1,3 @@
-from turtle import position
-
 import cv2
 import json
 from pathlib import Path
@@ -9,13 +7,39 @@ from typing import Any, Dict, List, Optional, Tuple
 TrackedPerson = Tuple[int, Any, float, float]
 
 
+# ── Zustandsschwellen ─────────────────────────────────────────────────
+# Anteil der kalibrierten Körperhöhe (Nase→Knöchel). Dadurch auflösungs-
+# und abstandsunabhängig — egal welche Kameraauflösung oder wie weit weg.
+SLIDE_DROP_FRACTION = 0.16   # Nase sinkt 16 % der Körperhöhe → SLIDE
+JUMP_RISE_FRACTION  = 0.07   # Nase steigt  7 % der Körperhöhe → JUMP
+# Fallback in Pixeln, falls keine Körperhöhe kalibriert (Knöchel nicht sichtbar)
+SLIDE_DROP_FALLBACK = 110
+JUMP_RISE_FALLBACK  = 55
+
+
 DEFAULT_REFERENCE = {
     "left_ratio": 1/3,
     "right_ratio": 2/3,
     "crouch_threshold": 60,
     "jump_height_ratio": 0.75,
     "nose_y": None,
+    "body_height": None,
 }
+
+
+def measure_body_height(person_kpts: Any) -> Optional[float]:
+    """Vertikaler Abstand Nase→Knöchel in Pixeln (Körperhöhe im Stand).
+    Liefert None, wenn Nase oder beide Knöchel nicht erkannt wurden.
+    """
+    nase = person_kpts[0]
+    li_knoechel = person_kpts[15]
+    re_knoechel = person_kpts[16]
+    knoechel_ys = [float(a[1]) for a in (li_knoechel, re_knoechel) if a[1] > 0]
+    if nase[1] <= 0 or not knoechel_ys:
+        return None
+    knoechel_y = sum(knoechel_ys) / len(knoechel_ys)
+    hoehe = knoechel_y - float(nase[1])
+    return hoehe if hoehe > 0 else None
 
 
 def get_default_reference() -> Dict[str, float]:
@@ -175,17 +199,26 @@ def analyze_person(person_kpts: Any, h: int, w: int, client: SimpleUDPClient, po
         target = "RECHTS"
     
     zustand = "STEHT"
-    
+
     # Nasenhöhe-basierte Zustandserkennung
     if nase[1] > 0 and reference_nose_y is not None:
         nose_y_current = float(nase[1])
-        
-        # Slide: wenn Nase >= 200px niedriger als Referenz (größer wird)
-        if nose_y_current >= reference_nose_y + 250:
-            zustand = "SLIDE"
 
-        # Jump: wenn Nase <= 150px höher als Referenz (kleiner wird)
-        elif nose_y_current <= reference_nose_y - 100:
+        # Schwellen relativ zur kalibrierten Körperhöhe → auflösungs- und
+        # abstandsunabhängig. Fallback auf feste Pixel, falls keine Höhe.
+        body_h = reference.get("body_height")
+        if body_h and body_h > 0:
+            slide_drop = body_h * SLIDE_DROP_FRACTION
+            jump_rise  = body_h * JUMP_RISE_FRACTION
+        else:
+            slide_drop = SLIDE_DROP_FALLBACK
+            jump_rise  = JUMP_RISE_FALLBACK
+
+        # Slide: Nase sinkt (nose_y wird größer)
+        if nose_y_current >= reference_nose_y + slide_drop:
+            zustand = "SLIDE"
+        # Jump: Nase steigt (nose_y wird kleiner)
+        elif nose_y_current <= reference_nose_y - jump_rise:
             zustand = "JUMP"
         # Sonst: STEHT
         else:

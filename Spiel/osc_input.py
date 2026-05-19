@@ -26,7 +26,7 @@ try:
 except ImportError:
     _OSC_AVAILABLE = False
 
-OSC_IP   = "192.168.137.1"
+OSC_IP   = "0.0.0.0"     # auf allen Netzwerk-Interfaces lauschen
 OSC_PORT = 9000
 
 action_queue: queue.Queue = queue.Queue()
