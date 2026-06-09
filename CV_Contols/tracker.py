@@ -297,3 +297,66 @@ def draw_no_person(annotated: Any, h: int) -> None:
         (0, 0, 255),
         2,
     )
+
+
+def left_arm_raised(person_kpts: Any, body_height: Optional[float] = None, pixel_thresh: int = 30) -> bool:
+    """Erkennt ob beide Arme oberhalb der Schultern sind.
+
+    Uses keypoint indices: 5=left_shoulder, 6=right_shoulder, 9=left_wrist, 10=right_wrist.
+    Wenn `body_height` gegeben, wird eine relative Schwelle genutzt (10% der Körperhöhe),
+    sonst `pixel_thresh` als Fallback.
+    """
+    # Indices: 5 left shoulder, 6 right shoulder, 9 left wrist, 10 right wrist
+    try:
+        li_sh = person_kpts[5]
+        re_sh = person_kpts[6]
+        li_wr = person_kpts[9]
+        re_wr = person_kpts[10]
+    except Exception:
+        return False
+
+    # Sicherstellen, dass Keypoints vorhanden sind
+    if li_sh[1] <= 0 or re_sh[1] <= 0 or li_wr[1] <= 0 or re_wr[1] <= 0:
+        return False
+
+    if body_height and body_height > 0:
+        thresh = body_height * 0.10
+    else:
+        thresh = pixel_thresh
+
+    # y-Werte in den Keypoints sind Pixelpositionen (größer = weiter unten).
+    # Arm gehoben = Hand (wrist) deutlich oberhalb Schulter (smaller y).
+    right_raised = float(re_wr[1]) < float(re_sh[1]) - thresh
+
+    return right_raised
+
+def right_arm_raised(person_kpts: Any, body_height: Optional[float] = None, pixel_thresh: int = 30) -> bool:
+    """Erkennt ob beide Arme oberhalb der Schultern sind.
+
+    Uses keypoint indices: 5=left_shoulder, 6=right_shoulder, 9=left_wrist, 10=right_wrist.
+    Wenn `body_height` gegeben, wird eine relative Schwelle genutzt (10% der Körperhöhe),
+    sonst `pixel_thresh` als Fallback.
+    """
+    # Indices: 5 left shoulder, 6 right shoulder, 9 left wrist, 10 right wrist
+    try:
+        li_sh = person_kpts[5]
+        re_sh = person_kpts[6]
+        li_wr = person_kpts[9]
+        re_wr = person_kpts[10]
+    except Exception:
+        return False
+
+    # Sicherstellen, dass Keypoints vorhanden sind
+    if li_sh[1] <= 0 or re_sh[1] <= 0 or li_wr[1] <= 0 or re_wr[1] <= 0:
+        return False
+
+    if body_height and body_height > 0:
+        thresh = body_height * 0.10
+    else:
+        thresh = pixel_thresh
+
+    # y-Werte in den Keypoints sind Pixelpositionen (größer = weiter unten).
+    # Arm gehoben = Hand (wrist) deutlich oberhalb Schulter (smaller y).
+    left_raised = float(li_wr[1]) < float(li_sh[1]) - thresh
+
+    return left_raised
