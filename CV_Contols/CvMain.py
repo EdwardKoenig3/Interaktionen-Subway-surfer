@@ -66,7 +66,7 @@ def main() -> None:
     real_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     print(f"Kameraauflösung: {real_w}x{real_h} | YOLO imgsz: {args.imgsz}")
 
-    print("Tracking läuft. Mit 'q' beenden. Drücke 'r' für Auswahlmodus.")
+    print("Tracking läuft. Mit 'q' beenden. Drücke 'r' für Auswahlmodus oder hebe die Arme für Auswahl.")
 
     cv2.namedWindow("Pose Tracking", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("Pose Tracking", 1920, 1080)
@@ -92,12 +92,17 @@ def main() -> None:
         persons = tracker.extract_persons(results)
 
         if not selection_made:
+            # Kontinuierlicher Auswahlmodus: kein gefrorenes Bild mehr.
+            # Zeichne Indizes und Prompt, zeige Frame und prüfe auf Tastendruck
+            # oder Armheben zur Auswahl.
             tracker.draw_person_indices(annotated, persons)
             tracker.draw_selection_prompt(annotated, h, persons)
             cv2.imshow("Pose Tracking", annotated)
-            key = cv2.waitKey(0) & 0xFF
+            key = cv2.waitKey(1) & 0xFF
             if key == ord('q') or key == 27:
                 break
+
+            # Tastenauswahl (0-9)
             selected = tracker.select_person_by_key(key, persons)
             if selected is not None:
                 selected_person = selected[0]
@@ -112,6 +117,24 @@ def main() -> None:
                 last_zustand = "STEHT"
                 print(f"Spieler {selected_person} ausgewählt")
                 print(f"Verwende Referenz für Spieler {selected_person}: {selected_reference}")
+                continue
+
+            # Auswahl per Armheben: wenn eine erkannte Person beide Arme hebt,
+            # wird diese Person als selektiert übernommen.
+            for idx, person_kpts, huefte_x, huefte_y in persons:
+                if tracker.right_arm_raised(person_kpts):
+                    selected_person = idx
+                    selected_position = (huefte_x, huefte_y)
+                    selected_reference = tracker.load_player_reference(selected_person)
+                    selected_reference["nose_y"] = None
+                    selected_reference["body_height"] = None
+                    selection_made = True
+                    position = "MITTE"
+                    zustand = "STEHT"
+                    last_zustand = "STEHT"
+                    print(f"Spieler {selected_person} per Armheben ausgewählt")
+                    print(f"Verwende Referenz für Spieler {selected_person}: {selected_reference}")
+                    break
             continue
 
         if persons and selected_position is not None:
@@ -160,6 +183,17 @@ def main() -> None:
             last_zustand = "STEHT"
             selected_reference = None
             print("Zurück in Auswahlmodus")
+        
+        for idx, person_kpts, huefte_x, huefte_y in persons:
+            if tracker.left_arm_raised(person_kpts):
+                print("Armheben erkannt, zurück in Auswahlmodus")
+                selection_made = False
+                selected_person = None
+                selected_position = None
+                position = "MITTE"
+                zustand = "STEHT"
+                last_zustand = "STEHT"
+                selected_reference = None
 
     cap.release()
     cv2.destroyAllWindows()
