@@ -109,9 +109,16 @@ class Player(Entity):
     def action_jump(self):
         if self._pb_timer > 0:
             return
-        if not self.is_jumping and not self.is_sliding:
+        if self.is_sliding:
+            return
+        # Sprung vom Boden ODER von einem Bus-/Zug-Dach (Plattform).
+        # Steht der Spieler auf einer Plattform, ist is_jumping zwar False,
+        # aber die Plattform-Bindung muss gelöst werden, damit er sauber
+        # abhebt und auf eine andere Plattform hüpfen kann.
+        if not self.is_jumping or self.platform is not None:
             self.vel_y      = JUMP_VEL
             self.is_jumping = True
+            self.platform   = None
 
     def action_slide(self):
         """Einmaliger Slide (für OSC/Kamera): läuft nach SLIDE_DUR automatisch aus."""
@@ -230,9 +237,15 @@ class Player(Entity):
                         self._ramp_jump = True
                         break
 
-        # ── Plattform-Exit: Zug vorbeigefahren ───────────────────────
+        # ── Plattform-Exit: hinten runtergefahren oder Spur verlassen ─
+        # WICHTIG: Hinterkante (z + hz) prüfen, nicht die Vorderkante –
+        # sonst fällt der Spieler direkt nach dem Aufsteigen wieder runter
+        # und kann nie vom Dach abspringen.
         if self.platform:
-            if self.platform._dead or (self.platform.z - self.platform.hz) < -0.5:
+            p = self.platform
+            off_back = (p.z + p.hz) < self.z          # ganzer Bus hinten vorbei
+            off_side = abs(p.x - self.x) > p.hw + PLAYER_HW  # Spur gewechselt, kein Dach drunter
+            if p._dead or off_back or off_side:
                 self.platform = None
                 if not self.is_jumping:
                     self.vel_y      = 0.0
