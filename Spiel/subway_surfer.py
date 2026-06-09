@@ -247,7 +247,7 @@ def update():
         cam_x += random.uniform(-0.45, 0.45) * (GS.shake_t / 0.5)
     camera.x = lerp(camera.x, cam_x, min(7 * dt, 1))
     # Kamera-Z leicht mit Pushback mitbewegen
-    camera.z = lerp(camera.z, -13 + player.z * 0.35, min(10 * dt, 1))
+    camera.z = lerp(camera.z, -18 + player.z * 0.35, min(10 * dt, 1))
 
     GS.obs_timer += dt
     if GS.obs_timer >= GS.obs_interval():
@@ -289,8 +289,8 @@ def input(key):
 
 # ── Szene aufbauen ────────────────────────────────────────────────────
 
-camera.position   = (0, 4.5, -13)
-camera.rotation_x = 16
+camera.position   = (0, 6.0, -18)
+camera.rotation_x = 18
 
 DirectionalLight(direction=(1, -2, 1), color=color.white)
 AmbientLight(color=C_AMBIENT)
