@@ -7,7 +7,9 @@
       "Bash(python -c \"import ursina, ursina.main, inspect; print\\([l for l in inspect.getsource\\(ursina.Ursina\\).split\\('\\\\n'\\) if 'icon' in l.lower\\(\\)]\\)\")",
       "Bash(sort -k9)",
       "Bash(python -c \"import ast; [ast.parse\\(open\\(f\\).read\\(\\)\\) for f in \\('player.py','subway_surfer.py','hud.py','world.py','obstacles.py'\\)]; print\\('OK'\\)\")",
-      "Bash(python -c \"import ursina; print\\('ursina version:', ursina.__version__ if hasattr\\(ursina, '__version__'\\) else 'unknown'\\)\")"
+      "Bash(python -c \"import ursina; print\\('ursina version:', ursina.__version__ if hasattr\\(ursina, '__version__'\\) else 'unknown'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('player.py'\\).read\\(\\)\\); ast.parse\\(open\\('subway_surfer.py'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")",
+      "Bash(python -c \"import ast; [ast.parse\\(open\\(f\\).read\\(\\)\\) for f in \\('player.py','subway_surfer.py','obstacles.py','constants.py'\\)]; print\\('Syntax OK'\\)\")"
     ]
   }
 }

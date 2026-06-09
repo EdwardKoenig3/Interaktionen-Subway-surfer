@@ -237,9 +237,15 @@ class Player(Entity):
                         self._ramp_jump = True
                         break
 
-        # ── Plattform-Exit: Zug vorbeigefahren ───────────────────────
+        # ── Plattform-Exit: hinten runtergefahren oder Spur verlassen ─
+        # WICHTIG: Hinterkante (z + hz) prüfen, nicht die Vorderkante –
+        # sonst fällt der Spieler direkt nach dem Aufsteigen wieder runter
+        # und kann nie vom Dach abspringen.
         if self.platform:
-            if self.platform._dead or (self.platform.z - self.platform.hz) < -0.5:
+            p = self.platform
+            off_back = (p.z + p.hz) < self.z          # ganzer Bus hinten vorbei
+            off_side = abs(p.x - self.x) > p.hw + PLAYER_HW  # Spur gewechselt, kein Dach drunter
+            if p._dead or off_back or off_side:
                 self.platform = None
                 if not self.is_jumping:
                     self.vel_y      = 0.0

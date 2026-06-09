@@ -39,10 +39,11 @@ INITIAL_SPD = 8.0
 SPEED_INC   = 0.002
 
 # ── Spieler ───────────────────────────────────────────────────────────
-# Sprung: kalibriert so dass Spieler NICHT über Züge (top=2.2) springt
-# max_height = JUMP_VEL² / (2*|GRAVITY|) = 56.25/36 = 1.5625
-# Spieler-Boden max = 0.75 + 1.5625 - 0.48 = 1.83 < Zug-Top 2.2  ✓
-JUMP_VEL      = 7.5
+# Sprung: kalibriert so dass Spieler Autos (Dach 1.3) locker überspringt,
+# Züge (top=2.2) aber NICHT erreicht (nur über die Rampe).
+# max_height = JUMP_VEL² / (2*|GRAVITY|) = 67.24/36 = 1.868
+# Spieler-Boden max = 0.75 + 1.868 - 0.48 = 2.14 < Zug-Top 2.2  ✓
+JUMP_VEL      = 8.2
 GRAVITY       = -18.0
 SLIDE_DUR     = 1.5
 LANE_SPD      = 18.0
@@ -55,7 +56,8 @@ PLAYER_HH     = 0.48    # Faktor × scale_y = halbe Höhe
 CAR_SX   = 2.0
 CAR_SY   = 1.2
 CAR_Y    = 0.6
-CAR_TOP  = CAR_Y + CAR_SY * 0.5   # = 1.2
+CAR_CAB_TOP = 1.3   # Oberkante Fahrerkabine = Kollisions- & Lande-Höhe (solide, kein Durchlaufen)
+CAR_TOP  = CAR_CAB_TOP
 
 # ── Zug ───────────────────────────────────────────────────────────────
 TRAIN_SX   = 2.2

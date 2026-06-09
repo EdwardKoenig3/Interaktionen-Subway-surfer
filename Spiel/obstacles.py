@@ -3,7 +3,7 @@ from ursina import Entity, destroy, color as ursina_color
 from constants import (
     LANES, LANE_COUNT, SPAWN_Z, DESPAWN_Z,
     C_COIN, C_CAR, C_CABIN,
-    CAR_SX, CAR_SY, CAR_Y,
+    CAR_SX, CAR_SY, CAR_Y, CAR_CAB_TOP,
     TRAIN_SX, TRAIN_SY, TRAIN_Y, TRAIN_TOP, RAMP_LEN,
     OVERHEAD_Y, OVERHEAD_SY,
     PLAYER_HW, PLAYER_HH,
@@ -62,6 +62,10 @@ class Obstacle(Entity):
         self.hw           = d['sx'] * 0.46   # halbe Breite (Kollision)
         self.hh           = d['sy'] * 0.48   # halbe Höhe   (Kollision)
         self.hz           = sz * 0.5          # halbe Tiefe  (Kollision)
+        if base_kind == 'car':
+            # Kollision deckt die Fahrerkabine mit ab → solide, kein Durchlaufen,
+            # und das Dach (CAR_CAB_TOP) wird zur Landefläche.
+            self.hh       = (CAR_CAB_TOP - CAR_Y)
         self._dead        = False
         self.has_ramp     = False
         self.has_platform = base_kind in ('train', 'car')
@@ -147,11 +151,12 @@ class Obstacle(Entity):
         cx, cy, cz = LANES[lane], CAR_Y, SPAWN_Z
         # Karosserie (unten)
         _add_box(cx, cy, cz, CAR_SX, CAR_SY, sz, 'textures/07_car.png')
-        # Kabine (oben): schmaler, kürzer, eigene Textur mit Scheiben/Dach
+        # Kabine (oben): schmaler, kürzer, niedrig gehalten, Oberkante = CAR_CAB_TOP.
+        # So bleibt das Auto überspringbar und die Kabine deckt sich mit der Kollision.
         cab_W = CAR_SX * 0.78
-        cab_H = CAR_SY * 0.60
+        cab_H = 0.50
         cab_D = sz * 0.55
-        cab_y = cy + CAR_SY * 0.5 + cab_H * 0.5
+        cab_y = CAR_CAB_TOP - cab_H * 0.5
         _add_box(cx, cab_y, cz, cab_W, cab_H, cab_D, 'textures/07b_car_cabin.png')
 
     def _build_overhead(self, lane: int):
