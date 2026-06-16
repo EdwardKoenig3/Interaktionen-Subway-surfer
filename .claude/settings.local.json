@@ -14,7 +14,8 @@
       "Bash(python _inspect_cam.py)",
       "Bash(python -c 'import ast,glob *)",
       "Bash(python _smoke.py)",
-      "Bash(python _smoke2.py)"
+      "Bash(python _smoke2.py)",
+      "Bash(rm -f _smoke.py)"
     ]
   }
 }

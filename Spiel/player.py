@@ -22,21 +22,19 @@ class Player(Entity):
         player.obstacles_ref = obstacles
     """
 
-    def __init__(self, state, own_mask=None, hide_from_mask=None):
+    def __init__(self, state, x_offset=0.0, marker_color=None):
         super().__init__(
             model=None,
             scale=(0.7, PLAYER_SY, 0.7),
-            position=(0, PLAYER_BASE_Y, 0),
+            position=(x_offset, PLAYER_BASE_Y, 0),
         )
         # Spielerabhängiger Zustand (Punkte/Leben/Unverwundbarkeit/alive).
         self.state         = state
-        # Kamera-Masken für Splitscreen: own_mask = eigene Kamera (für Blinken),
-        # hide_from_mask = andere Kamera (Figur dort dauerhaft ausblenden).
-        self.own_mask      = own_mask
-        if hide_from_mask is not None:
-            self.hide(hide_from_mask)
+        # Seitlicher Versatz innerhalb der Spur (damit sich zwei Spieler in
+        # derselben Spur nicht komplett überdecken).
+        self.x_offset      = x_offset
         self.lane          = 1
-        self.target_x      = LANES[1]
+        self.target_x      = LANES[1] + x_offset
         self.vel_y         = 0.0
         self.is_jumping    = False
         self.is_sliding    = False
@@ -89,7 +87,22 @@ class Player(Entity):
         _box(+0.20, -0.28,  0,    0.37, 0.31, 0.40, 'textures/03_legs.png')
         _box(0,     0.04,  -0.35, 0.55, 0.28, 0.20, 'textures/04_backpack.png')
 
+        # Signalfarben-Marker zur Unterscheidung der Spieler (leuchtender
+        # Diamant über dem Kopf + Boden-Ring unter den Füßen).
+        self.marker_color = marker_color
+        if marker_color is not None:
+            from ursina import Entity as _E
+            self.beacon = _E(parent=self, model='cube', color=marker_color,
+                             unlit=True, scale=(0.16, 0.16, 0.16),
+                             position=(0, 0.62, 0), rotation=(45, 45, 0))
+            self.ring = _E(parent=self, model='circle', color=marker_color,
+                           unlit=True, double_sided=True, scale=1.3,
+                           rotation=(90, 0, 0), position=(0, -0.72, 0))
+
     # ── Öffentliches Interface ────────────────────────────────────────
+
+    def _lane_x(self, lane: int) -> float:
+        return LANES[lane] + self.x_offset
 
     def set_lane(self, lane: int):
         """Setzt die Zielspur direkt (für positionsbasierte Steuerung via OSC)."""
@@ -97,21 +110,21 @@ class Player(Entity):
             return
         if self._lane_passable(lane):
             self.lane     = lane
-            self.target_x = LANES[lane]
+            self.target_x = self._lane_x(lane)
 
     def action_left(self):
         if self._pb_timer > 0:
             return
         if self.lane > 0 and self._lane_passable(self.lane - 1):
             self.lane    -= 1
-            self.target_x = LANES[self.lane]
+            self.target_x = self._lane_x(self.lane)
 
     def action_right(self):
         if self._pb_timer > 0:
             return
         if self.lane < LANE_COUNT - 1 and self._lane_passable(self.lane + 1):
             self.lane    += 1
-            self.target_x = LANES[self.lane]
+            self.target_x = self._lane_x(self.lane)
 
     def action_jump(self):
         if self._pb_timer > 0:
@@ -201,13 +214,8 @@ class Player(Entity):
             return
         dt = time.dt
 
-        # Blinken bei Unverwundbarkeit – maskenbewusst, damit die Splitscreen-
-        # Kamera-Trennung (hide_from_mask) nicht überschrieben wird.
-        show_now = (int(self.state.inv_timer * 8) % 2 == 0) if self.state.is_invincible() else True
-        if self.own_mask is not None:
-            (self.show if show_now else self.hide)(self.own_mask)
-        else:
-            self.visible = show_now
+        # Blinken bei Unverwundbarkeit
+        self.visible = (int(self.state.inv_timer * 8) % 2 == 0) if self.state.is_invincible() else True
 
         # ── Pushback-Z-Animation ──────────────────────────────────────
         if self._pb_timer > 0:

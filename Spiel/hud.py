@@ -13,13 +13,17 @@ class PlayerHud:
     `x_scale` staucht die horizontale Streuung für die schmaleren Splitscreen-Hälften.
     """
 
-    def __init__(self, x_center: float = 0.0, x_scale: float = 1.0):
+    def __init__(self, x_center: float = 0.0, x_scale: float = 1.0,
+                 accent=None, label: str = ''):
         self.x_center = x_center
         s = x_scale
         tscale = 1.0 if x_scale >= 0.99 else 0.8   # Texte in der Hälfte etwas kleiner
+        accent = accent or color.white
 
+        self.name = Text(label, position=(x_center, 0.40), origin=(0, 0),
+                         scale=1.0 * tscale, color=accent) if label else None
         self.score = Text('0', position=(x_center, 0.46), origin=(0, 0),
-                          scale=2.2 * tscale, color=color.white)
+                          scale=2.2 * tscale, color=accent)
         self.coins = Text('$ 0', position=(x_center - 0.40 * s, 0.46), origin=(-0.5, 0),
                           scale=1.6 * tscale, color=C_COIN)
         self.over  = Text('', position=(x_center, 0.12), origin=(0, 0), scale=3 * tscale, color=color.red)
@@ -56,7 +60,10 @@ class PlayerHud:
 
     def destroy(self):
         from ursina import destroy
-        for e in (self.score, self.coins, self.over, self.sub, self.restart):
+        elems = [self.score, self.coins, self.over, self.sub, self.restart]
+        if self.name:
+            elems.append(self.name)
+        for e in elems:
             destroy(e)
         for parts in self.hearts:
             for part in parts:

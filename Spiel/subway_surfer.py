@@ -1,22 +1,27 @@
 """
-Subway Surfer – 3D Prototype (Splitscreen-Multiplayer)
+Subway Surfer – 3D Prototype (Koop in einem Bildschirm)
 Einstiegspunkt: python subway_surfer.py
+
+Beide Spieler laufen gemeinsam in EINER Ansicht auf demselben Track. Sie sind an
+ihrer Signalfarbe unterscheidbar (Spieler 1 cyan, Spieler 2 orange – Leucht-Marker
+über dem Kopf, Boden-Ring und farbiges HUD) und durch einen kleinen seitlichen
+Versatz. Leben und Punkte sind pro Spieler getrennt, Münzen werden geteilt
+(wer zuerst dran ist, sammelt sie ein).
 
 Dateistruktur:
     constants.py    – Farben und Spielkonstanten
     game_state.py   – GS (geteilter Track) + PlayerState (pro Spieler)
-    player.py       – Player (Physik, Steuerung, Pushback)
+    player.py       – Player (Physik, Steuerung, Pushback, Marker)
     obstacles.py    – Obstacle (Auto, Zug, Overhead) – geteilt
-    coins.py        – Coin (pro Spieler, maskiert)
+    coins.py        – Coin – geteilt
     world.py        – GroundTile, make_buildings – geteilt
-    hud.py          – PlayerHud (pro Seite)
-    menu.py         – StartMenu (1/2 Spieler, Steuerquelle pro Seite)
-    splitscreen.py  – zweite Kamera + Display-Regions + Masken
+    hud.py          – PlayerHud (pro Spieler)
+    menu.py         – StartMenu (1/2 Spieler, Steuerquelle)
     osc_input.py    – OSC (/game/vision/*, /game/voice/*)
     subway_surfer.py– App, Spawn, Kollision, Update, Input
 
 Steuerung wird beim Start gewählt:
-    TASTATUR  – links A/D/W/S, rechts Pfeiltasten (Einzelspieler: beides)
+    TASTATUR  – Spieler 1 A/D/W/S, Spieler 2 Pfeiltasten (Einzelspieler: beides)
     VISION    – OSC /game/vision/{left,center,right,jump,slide,stand}
     VOICE     – OSC /game/voice/{left,center,right,jump,slide,stand}
 """
@@ -41,8 +46,17 @@ from coins       import Coin
 from world       import GroundTile, SidewalkTile, make_buildings
 from hud         import PlayerHud
 from menu        import StartMenu
-import splitscreen
-from splitscreen import cam1_mask, cam2_mask
+
+# ── Kamera-Parameter ──────────────────────────────────────────────────
+CAM_Y      = 6.0
+CAM_ROT_X  = 18.0
+CAM_Z_BASE = -18.0
+
+# Signalfarben + seitlicher Versatz pro Spieler (in einem Bildschirm)
+P1_COLOR  = color.cyan
+P2_COLOR  = color.orange
+P1_OFFSET = -0.42
+P2_OFFSET = 0.42
 
 # ── App ──────────────────────────────────────────────────────────────
 app = Ursina(title='Subway Surfer 3D', vsync=True)
@@ -66,20 +80,18 @@ Entity(model='sphere', texture='textures/sky.png', scale=300,
 # ── Pro-Spieler-Container ─────────────────────────────────────────────
 
 class Side:
-    """Alles, was zu einer Spielfigur/Bildschirmseite gehört."""
-    def __init__(self, state, player, hud, cam_ent, hide_mask, src, side):
-        self.state     = state
-        self.player    = player
-        self.hud       = hud
-        self.cam_ent   = cam_ent      # Kamera-Entity (links: ursina camera, rechts: cam2_rig)
-        self.hide_mask = hide_mask    # Maske, vor der die Münzen dieser Seite versteckt werden
-        self.src       = src          # 'keyboard' | 'vision' | 'voice'
-        self.side      = side         # 'left' | 'right' | 'single'
-        self.coins: list[Coin] = []
+    """Alles, was zu einer Spielfigur gehört."""
+    def __init__(self, state, player, hud, src, side):
+        self.state  = state
+        self.player = player
+        self.hud    = hud
+        self.src    = src      # 'keyboard' | 'vision' | 'voice'
+        self.side   = side     # 'left' | 'right' | 'single'
 
 
 # ── Globale Listen / Zustand ──────────────────────────────────────────
 obstacles: list[Obstacle] = []
+coins:     list[Coin]     = []
 tiles:     list[GroundTile] = []
 sides:     list[Side] = []
 phase = 'menu'        # 'menu' | 'playing'
@@ -97,11 +109,9 @@ def _spawn_obstacle():
     obstacles.append(Obstacle(random.randint(0, LANE_COUNT - 1), kind))
 
 
-def _coin_specs():
-    """Eine Münz-Anordnung (lane/mode einmal würfeln) – für alle Spieler identisch."""
+def _spawn_coins():
     lane = random.randint(0, LANE_COUNT - 1)
     mode = random.choices(['line', 'arc', 'high'], weights=[4, 4, 2])[0]
-    specs = []
     if mode == 'arc':
         T = 2 * JUMP_VEL / abs(GRAVITY)
         n = 7
@@ -109,24 +119,16 @@ def _coin_specs():
             t = T * i / (n - 1)
             y = PLAYER_BASE_Y + JUMP_VEL * t + 0.5 * GRAVITY * t ** 2
             z = SPAWN_Z + GS.speed * t
-            specs.append((lane, z, max(y, PLAYER_BASE_Y + 0.1)))
+            coins.append(Coin(lane, z, y=max(y, PLAYER_BASE_Y + 0.1)))
     elif mode == 'high':
         for i in range(random.randint(3, 5)):
-            specs.append((lane, SPAWN_Z + i * 1.8, TRAIN_TOP + 0.45))
+            coins.append(Coin(lane, SPAWN_Z + i * 1.8, y=TRAIN_TOP + 0.45))
     else:
         for i in range(random.randint(3, 6)):
-            specs.append((lane, SPAWN_Z + i * 1.7, 1.0))
-    return specs
+            coins.append(Coin(lane, SPAWN_Z + i * 1.7, y=1.0))
 
 
-def _spawn_coins():
-    specs = _coin_specs()
-    for side in sides:
-        for (lane, z, y) in specs:
-            side.coins.append(Coin(lane, z, y=y, hide_from_mask=side.hide_mask))
-
-
-# ── Kollision (pro Spieler, geteilte Hindernisse) ─────────────────────
+# ── Kollision (pro Spieler, geteilte Hindernisse + Münzen) ────────────
 
 def _check_collisions(side: Side):
     if not side.state.alive:
@@ -181,13 +183,12 @@ def _check_collisions(side: Side):
                 _check_all_dead()
                 return
 
-    # ── Münzen einsammeln ─────────────────────────────────────────────
-    for c in side.coins[:]:
-        if c.collect(player):
+    # ── Münzen einsammeln (geteilt: wer zuerst dran ist) ──────────────
+    for c in coins:
+        if not c._dead and c.collect(player):
             c._dead = True
             state.coins += 1
             destroy(c)
-            side.coins.remove(c)
             if state.coins % 50 == 0 and state.lives < MAX_LIVES:
                 state.lives += 1
                 side.hud.update(state)
@@ -204,21 +205,18 @@ def _check_all_dead():
 
 
 def _teardown_match():
-    """Spieler/Münzen/HUDs/Hindernisse abräumen, Splitscreen zurückbauen."""
     for o in obstacles:
         for d in o._deco:
             destroy(d)
         destroy(o)
     obstacles.clear()
+    for c in coins:
+        destroy(c)
+    coins.clear()
     for side in sides:
-        for c in side.coins:
-            destroy(c)
-        side.coins.clear()
         destroy(side.player)
         side.hud.destroy()
     sides.clear()
-    if splitscreen.is_active():
-        splitscreen.teardown_splitscreen()
     if restart_hint:
         restart_hint.enabled = False
 
@@ -232,30 +230,28 @@ def _start_match(cfg: dict):
     GS.paused  = False
     clear_actions()
 
-    # Hauptkamera zurücksetzen (links bzw. Vollbild)
-    camera.position   = (0, splitscreen.CAM_Y, splitscreen.CAM_Z_BASE)
-    camera.rotation_x = splitscreen.CAM_ROT_X
+    camera.position   = (0, CAM_Y, CAM_Z_BASE)
+    camera.rotation_x = CAM_ROT_X
 
     if cfg['mode'] == 2:
-        cam2_rig = splitscreen.setup_splitscreen()
-        # links
         st_l = PlayerState()
-        pl_l = Player(st_l, own_mask=cam1_mask, hide_from_mask=cam2_mask)
+        pl_l = Player(st_l, x_offset=P1_OFFSET, marker_color=P1_COLOR)
         pl_l.obstacles_ref = obstacles
-        sides.append(Side(st_l, pl_l, PlayerHud(x_center=-0.45, x_scale=0.5),
-                          camera, hide_mask=cam2_mask, src=cfg['sources'][0], side='left'))
-        # rechts
+        sides.append(Side(st_l, pl_l,
+                          PlayerHud(x_center=-0.55, x_scale=0.6, accent=P1_COLOR, label='P1'),
+                          src=cfg['sources'][0], side='left'))
         st_r = PlayerState()
-        pl_r = Player(st_r, own_mask=cam2_mask, hide_from_mask=cam1_mask)
+        pl_r = Player(st_r, x_offset=P2_OFFSET, marker_color=P2_COLOR)
         pl_r.obstacles_ref = obstacles
-        sides.append(Side(st_r, pl_r, PlayerHud(x_center=0.45, x_scale=0.5),
-                          cam2_rig, hide_mask=cam1_mask, src=cfg['sources'][1], side='right'))
+        sides.append(Side(st_r, pl_r,
+                          PlayerHud(x_center=0.55, x_scale=0.6, accent=P2_COLOR, label='P2'),
+                          src=cfg['sources'][1], side='right'))
     else:
         st = PlayerState()
-        pl = Player(st, own_mask=None, hide_from_mask=None)
+        pl = Player(st, x_offset=0.0, marker_color=None)
         pl.obstacles_ref = obstacles
         sides.append(Side(st, pl, PlayerHud(x_center=0.0, x_scale=1.0),
-                          camera, hide_mask=None, src=cfg['sources'][0], side='single'))
+                          src=cfg['sources'][0], side='single'))
 
     for side in sides:
         side.hud.update(side.state)
@@ -304,10 +300,21 @@ def update():
                 poll_actions(side.player, side.src)
         _check_collisions(side)
         side.hud.update(st)
-        splitscreen.follow_camera(side.cam_ent, side.player, st, dt)
 
-    # ── tote Hindernisse entfernen (geteilt) ──────────────────────────
+    # ── Kamera: Mittelwert der (lebenden) Spieler folgen + Shake ──────
+    follow = [s for s in sides if s.state.alive] or sides
+    avg_x  = sum(s.player.x for s in follow) / len(follow)
+    avg_z  = sum(s.player.z for s in follow) / len(follow)
+    cam_x  = avg_x * 0.25
+    shake  = max((s.state.shake_t for s in sides), default=0.0)
+    if shake > 0:
+        cam_x += random.uniform(-0.45, 0.45) * (shake / 0.5)
+    camera.x = lerp(camera.x, cam_x, min(7 * dt, 1))
+    camera.z = lerp(camera.z, CAM_Z_BASE + avg_z * 0.35, min(10 * dt, 1))
+
+    # ── tote Entities entfernen (geteilt) ─────────────────────────────
     obstacles[:] = [o for o in obstacles if not o._dead]
+    coins[:]     = [c for c in coins     if not c._dead]
 
 
 # ── Eingabe ───────────────────────────────────────────────────────────
@@ -320,7 +327,7 @@ def _handle_keyboard(side: Side, key):
         elif key == 'up arrow':         p.action_jump()
         elif key == 'down arrow':       p.start_slide()
         elif key == 'down arrow up':    p.stop_slide()
-    elif side.side == 'left':          # nur WASD (Konflikt mit rechts vermeiden)
+    elif side.side == 'left':          # nur WASD
         if   key == 'a':                p.action_left()
         elif key == 'd':                p.action_right()
         elif key in ('w', 'space'):     p.action_jump()
@@ -335,7 +342,6 @@ def _handle_keyboard(side: Side, key):
 
 
 def input(key):
-    global phase
     if key == 'escape':
         sys.exit()
 
@@ -361,8 +367,8 @@ def input(key):
 
 # ── Szene aufbauen ────────────────────────────────────────────────────
 
-camera.position   = (0, splitscreen.CAM_Y, splitscreen.CAM_Z_BASE)
-camera.rotation_x = splitscreen.CAM_ROT_X
+camera.position   = (0, CAM_Y, CAM_Z_BASE)
+camera.rotation_x = CAM_ROT_X
 
 DirectionalLight(direction=(1, -2, 1), color=color.white)
 AmbientLight(color=C_AMBIENT)
