@@ -10,13 +10,16 @@ class Coin(Entity):
     Wird nur eingesammelt wenn Spieler auf gleicher Höhe ist.
     """
 
-    def __init__(self, lane: int, z: float, y: float = 1.0):
+    def __init__(self, lane: int, z: float, y: float = 1.0, hide_from_mask=None):
         super().__init__(
             model='sphere', texture='textures/coin.png',
             scale=0.35,
             position=(LANES[lane], y, z),
         )
         self._dead = False
+        # Splitscreen: Münze gehört einem Spieler → vor der anderen Kamera ausblenden.
+        if hide_from_mask is not None:
+            self.hide(hide_from_mask)
 
     def update(self):
         if not GS.running or self._dead:

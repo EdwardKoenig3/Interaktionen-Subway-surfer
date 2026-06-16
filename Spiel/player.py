@@ -22,12 +22,19 @@ class Player(Entity):
         player.obstacles_ref = obstacles
     """
 
-    def __init__(self):
+    def __init__(self, state, own_mask=None, hide_from_mask=None):
         super().__init__(
             model=None,
             scale=(0.7, PLAYER_SY, 0.7),
             position=(0, PLAYER_BASE_Y, 0),
         )
+        # Spielerabhängiger Zustand (Punkte/Leben/Unverwundbarkeit/alive).
+        self.state         = state
+        # Kamera-Masken für Splitscreen: own_mask = eigene Kamera (für Blinken),
+        # hide_from_mask = andere Kamera (Figur dort dauerhaft ausblenden).
+        self.own_mask      = own_mask
+        if hide_from_mask is not None:
+            self.hide(hide_from_mask)
         self.lane          = 1
         self.target_x      = LANES[1]
         self.vel_y         = 0.0
@@ -190,12 +197,17 @@ class Player(Entity):
     # ── Update (Physik) ───────────────────────────────────────────────
 
     def update(self):
-        if not GS.running:
+        if not GS.running or not self.state.alive:
             return
         dt = time.dt
 
-        # Blinken bei Unverwundbarkeit
-        self.visible = (int(GS.inv_timer * 8) % 2 == 0) if GS.is_invincible() else True
+        # Blinken bei Unverwundbarkeit – maskenbewusst, damit die Splitscreen-
+        # Kamera-Trennung (hide_from_mask) nicht überschrieben wird.
+        show_now = (int(self.state.inv_timer * 8) % 2 == 0) if self.state.is_invincible() else True
+        if self.own_mask is not None:
+            (self.show if show_now else self.hide)(self.own_mask)
+        else:
+            self.visible = show_now
 
         # ── Pushback-Z-Animation ──────────────────────────────────────
         if self._pb_timer > 0:
