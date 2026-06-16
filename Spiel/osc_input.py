@@ -40,6 +40,9 @@ _queues: dict[str, queue.Queue] = {
     "voice":  queue.Queue(),
 }
 
+# Pause ist global (quellenunabhängig) → eigene Queue
+_pause_q: queue.Queue = queue.Queue()
+
 
 def start_osc_server() -> bool:
     if not _OSC_AVAILABLE:
@@ -63,6 +66,10 @@ def start_osc_server() -> bool:
             _queues[source].put(("action", name))
         return _h
 
+    def _pause_handler(addr, *args):
+        _log(addr, *args)
+        _pause_q.put(1)
+
     def _map_namespace(prefix, source):
         dispatcher.map(f"{prefix}/left",   _lane(source, 0))
         dispatcher.map(f"{prefix}/center", _lane(source, 1))
@@ -70,6 +77,7 @@ def start_osc_server() -> bool:
         dispatcher.map(f"{prefix}/jump",   _action(source, "jump"))
         dispatcher.map(f"{prefix}/slide",  _action(source, "slide"))
         dispatcher.map(f"{prefix}/stand",  _action(source, "stand"))
+        dispatcher.map(f"{prefix}/pause",  _pause_handler)
 
     _map_namespace("/game/vision", "vision")
     _map_namespace("/game/voice",  "voice")
@@ -84,19 +92,31 @@ def start_osc_server() -> bool:
 
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print(f"[OSC] Server läuft auf {OSC_IP}:{OSC_PORT}")
-    print("[OSC] Vision: /game/vision/{left,center,right,jump,slide,stand}")
-    print("[OSC] Voice:  /game/voice/{left,center,right,jump,slide,stand}")
+    print("[OSC] Vision: /game/vision/{left,center,right,jump,slide,stand,pause}")
+    print("[OSC] Voice:  /game/voice/{left,center,right,jump,slide,stand,pause}")
     return True
 
 
 def clear_actions() -> None:
-    """Alle gepufferten OSC-Aktionen verwerfen (z. B. beim Match-Start)."""
-    for q in _queues.values():
+    """Alle gepufferten OSC-Aktionen (inkl. Pause) verwerfen (z. B. beim Match-Start)."""
+    for q in (*_queues.values(), _pause_q):
         while not q.empty():
             try:
                 q.get_nowait()
             except queue.Empty:
                 break
+
+
+def poll_pause() -> bool:
+    """True, wenn seit dem letzten Aufruf mindestens ein Pause-Event eintraf."""
+    got = False
+    while not _pause_q.empty():
+        try:
+            _pause_q.get_nowait()
+            got = True
+        except queue.Empty:
+            break
+    return got
 
 
 def poll_actions(player, source: str) -> None:

@@ -28,7 +28,7 @@ Steuerung wird beim Start gewählt:
 
 import random, sys, math
 from ursina import *
-from osc_input import start_osc_server, poll_actions, clear_actions
+from osc_input import start_osc_server, poll_actions, clear_actions, poll_pause
 
 from constants import (
     C_SKY, C_AMBIENT,
@@ -97,6 +97,9 @@ sides:     list[Side] = []
 phase = 'menu'        # 'menu' | 'playing'
 menu: StartMenu | None = None
 restart_hint: Text | None = None
+pause_text:   Text | None = None
+result_text:  Text | None = None
+result_sub:   Text | None = None
 
 
 # ── Spawn ─────────────────────────────────────────────────────────────
@@ -174,14 +177,14 @@ def _check_collisions(side: Side):
         if hit:
             state.lives    -= 1
             state.inv_timer = INVINCIBLE
-            state.shake_t   = 0.5
             side.hud.update(state)
-            player.pushback()
             if state.lives <= 0:
                 state.alive = False
-                side.hud.show_game_over(state)
-                _check_all_dead()
+                _end_match_on_death(side)
                 return
+            # nur bei nicht-tödlichem Treffer: Wackeln + Zurückstoßen
+            state.shake_t = 0.5
+            player.pushback()
 
     # ── Münzen einsammeln (geteilt: wer zuerst dran ist) ──────────────
     for c in coins:
@@ -196,12 +199,40 @@ def _check_collisions(side: Side):
 
 # ── Game Over / Menü ──────────────────────────────────────────────────
 
-def _check_all_dead():
-    if all(not s.state.alive for s in sides):
-        GS.running = False
-        if restart_hint:
-            restart_hint.text    = 'R  –  zurück zum Menü'
-            restart_hint.enabled = True
+def _end_match_on_death(dead_side: Side):
+    """Sobald ein Spieler stirbt, endet das Match. In 2P gewinnt der andere."""
+    GS.running = False
+    if len(sides) == 2:
+        winner = next((s for s in sides if s is not dead_side), None)
+        wname  = 'SPIELER 1' if winner.side == 'left' else 'SPIELER 2'
+        wcol   = P1_COLOR if winner.side == 'left' else P2_COLOR
+        result_text.text  = f'{wname} GEWINNT!'
+        result_text.color = wcol
+        result_sub.text   = f'P1: {sides[0].state.score}   P2: {sides[1].state.score}'
+    else:
+        result_text.text  = 'GAME OVER'
+        result_text.color = color.red
+        result_sub.text   = f'Score: {dead_side.state.score}   Münzen: {dead_side.state.coins}'
+    result_text.enabled  = True
+    result_sub.enabled   = True
+    restart_hint.text    = 'R  –  zurück zum Menü'
+    restart_hint.enabled = True
+
+
+def _hide_overlays():
+    for t in (result_text, result_sub, pause_text):
+        if t:
+            t.text    = ''
+            t.enabled = False
+    if restart_hint:
+        restart_hint.enabled = False
+
+
+def _set_paused(p: bool):
+    GS.paused = p
+    if pause_text:
+        pause_text.text    = 'PAUSE' if p else ''
+        pause_text.enabled = p
 
 
 def _teardown_match():
@@ -229,6 +260,7 @@ def _start_match(cfg: dict):
     GS.running = True
     GS.paused  = False
     clear_actions()
+    _hide_overlays()
 
     camera.position   = (0, CAM_Y, CAM_Z_BASE)
     camera.rotation_x = CAM_ROT_X
@@ -263,6 +295,7 @@ def _start_match(cfg: dict):
 def _to_menu():
     global phase
     _teardown_match()
+    _hide_overlays()
     GS.running = False
     GS.paused  = True
     phase = 'menu'
@@ -272,7 +305,12 @@ def _to_menu():
 # ── Haupt-Update ──────────────────────────────────────────────────────
 
 def update():
-    if phase != 'playing' or GS.paused:
+    if phase != 'playing':
+        return
+    # OSC-Pause (Vision/Voice) – muss auch im pausierten Zustand greifen
+    if GS.running and poll_pause():
+        _set_paused(not GS.paused)
+    if GS.paused:
         return
     dt = time.dt
 
@@ -356,7 +394,7 @@ def input(key):
             _to_menu()
         return
     if key == 'p':
-        GS.paused = not GS.paused
+        _set_paused(not GS.paused)
         return
     if GS.paused:
         return
@@ -385,6 +423,16 @@ for i in range(TILE_COUNT):
 restart_hint = Text('', parent=camera.ui, origin=(0, 0), position=(0, -0.42),
                     scale=1.3, color=color.white, z=0)
 restart_hint.enabled = False
+
+pause_text = Text('', parent=camera.ui, origin=(0, 0), position=(0, 0.0),
+                  scale=2.6, color=color.white, z=0)
+pause_text.enabled = False
+result_text = Text('', parent=camera.ui, origin=(0, 0), position=(0, 0.06),
+                   scale=3.0, color=color.yellow, z=0)
+result_text.enabled = False
+result_sub = Text('', parent=camera.ui, origin=(0, 0), position=(0, -0.06),
+                  scale=1.4, color=color.white, z=0)
+result_sub.enabled = False
 
 GS.running = False
 GS.paused  = True
