@@ -167,35 +167,18 @@ def analyze_person(person_kpts: Any, h: int, w: int, client: SimpleUDPClient, po
     jump_tolerance = reference.get("jump_tolerance", 30)
     slide_tolerance = reference.get("slide_tolerance", 30)
 
-    # Alte Logik zur Positionserkennung basierend auf Hüfte
-    # if huefte_x < w * left_ratio:
-    #     target = "LINKS"
-    #     if position != target:
-    #         client.send_message("/game/left", [])
-    #         print("/game/left")
-    # elif huefte_x < w * right_ratio:
-    #     target = "MITTE"
-    #     if position != target:
-    #         client.send_message("/game/center", [])
-    #         print("/game/center")
-    # else:
-    #     target = "RECHTS"
-    #     if position != target:
-    #         client.send_message("/game/right", [])
-    #         print("/game/right")
-
     # Neue Logik zur Positionserkennung basierend auf Nase
     if nase[0] < w * left_ratio:
-        client.send_message("/game/left", [])
-        print("/game/left")
+        client.send_message("/game/vision/left", [])
+        print("/game/vision/left")
         target = "LINKS"
     elif nase[0] < w * right_ratio:
-        client.send_message("/game/center", [])
-        print("/game/center")
+        client.send_message("/game/vision/center", [])
+        print("/game/vision/center")
         target = "MITTE"
     else:
-        client.send_message("/game/right", [])
-        print("/game/right")
+        client.send_message("/game/vision/right", [])
+        print("/game/vision/right")
         target = "RECHTS"
     
     zustand = "STEHT"
@@ -227,24 +210,15 @@ def analyze_person(person_kpts: Any, h: int, w: int, client: SimpleUDPClient, po
         # Nachricht nur senden, wenn Zustand sich ändert
         if zustand != last_zustand:
             if zustand == "JUMP":
-                client.send_message("/game/jump", [])
-                print("/game/jump")
+                client.send_message("/game/vision/jump", [])
+                print("/game/vision/jump")
             elif zustand == "SLIDE":
-                client.send_message("/game/slide", [])
-                print("/game/slide")
+                client.send_message("/game/vision/slide", [])
+                print("/game/vision/slide")
             else:
-                #client.send_message("/game/stand", [])
-                print("/game/stand")
+                #client.send_message("/game/vision/stand", [])
+                print("/game/vision/stand")
     
-    # Fallback Slide-Erkennung basierend auf Knie (alte Logik)
-    #if zustand == "STEHT" and (li_knie[1] > 0 and re_knie[1] > 0 and li_huefte[1] > 0 and re_huefte[1] > 0):
-    #    knie_y = (li_knie[1] + re_knie[1]) / 2
-    #    huefte_y = (li_huefte[1] + re_huefte[1]) / 2
-    #    if abs(huefte_y - knie_y) < crouch_threshold:
-    #        zustand = "SLIDE"
-    #        if zustand != last_zustand:
-    #            client.send_message("/game/slide", [])
-    #            print("/game/slide")
 
     return target, zustand
 
