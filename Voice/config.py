@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-MODEL_PATH = r"..\model-us"
+MODEL_PATH = r".\model-us"
 IP = "192.168.137.1"
 PORT = 9000
 REF_FILE = "current_owner.wav"
