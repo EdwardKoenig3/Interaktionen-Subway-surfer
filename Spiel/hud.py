@@ -1,51 +1,80 @@
 from ursina import Text, Entity, camera, color, Color
 from constants import C_COIN, MAX_LIVES
 
-_HEART_FONT = 'C:/Windows/Fonts/arialuni.ttf'   # Arial Unicode – hat ♥
+_HEART_FULL  = 'textures/05_heart_full.png'
+_HEART_EMPTY = 'textures/05_heart_empty.png'
 
 
-def create_hud():
+class PlayerHud:
+    """HUD einer Spieler-Seite (Score, Münzen, Herzen, Game-Over).
+
+    `x_center` verschiebt das HUD in die jeweilige Bildschirmhälfte
+    (0.0 = Vollbild/1P, negativ = linke Hälfte, positiv = rechte Hälfte).
+    `x_scale` staucht die horizontale Streuung für die schmaleren Splitscreen-Hälften.
     """
-    Erstellt alle HUD-Elemente. Muss NACH Ursina-App-Init aufgerufen werden.
-    Gibt (score, coins, hint, over, sub, restart, hearts) zurück.
-    """
-    score   = Text('0',   position=( 0,    0.46), origin=(0, 0),    scale=2.2, color=color.white)
-    coins   = Text('$ 0', position=(-0.82, 0.46), origin=(-0.5, 0), scale=1.6, color=C_COIN)
-    hint    = Text('A D   Jump (W/Space)   Slide (S)',
-                   position=(0, -0.47), origin=(0, 0), scale=0.9,
-                   color=Color(0.7, 0.7, 0.7, 1))
-    over    = Text('', position=(0,  0.12), origin=(0, 0), scale=3,   color=color.red)
-    sub     = Text('', position=(0,  0.00), origin=(0, 0), scale=1.5, color=color.white)
-    restart = Text('', position=(0, -0.12), origin=(0, 0), scale=1.5, color=C_COIN)
 
-    # Herzen: ♥-Symbol mit Arial Unicode, Fallback auf rote Rauten
-    hearts = []
-    for i in range(MAX_LIVES):
-        try:
-            h = Text(
-                text='\u2665',          # ♥
-                font=_HEART_FONT,
-                position=(0.56 + i * 0.075, 0.445),
-                origin=(0, 0),
-                scale=2.8,
-                color=color.red,
-            )
-        except Exception:
-            # Fallback: rote Raute (quad rotiert 45°)
-            h = Entity(
-                parent=camera.ui,
-                model='quad',
-                color=color.red,
-                scale=(0.048, 0.048),
-                rotation_z=45,
-                position=(0.56 + i * 0.075, 0.445),
-            )
-        hearts.append(h)
+    def __init__(self, x_center: float = 0.0, x_scale: float = 1.0,
+                 accent=None, label: str = ''):
+        self.x_center = x_center
+        s = x_scale
+        tscale = 1.0 if x_scale >= 0.99 else 0.8   # Texte in der Hälfte etwas kleiner
+        accent = accent or color.white
 
-    return score, coins, hint, over, sub, restart, hearts
+        self.name = Text(label, position=(x_center, 0.40), origin=(0, 0),
+                         scale=1.0 * tscale, color=accent) if label else None
+        self.score = Text('0', position=(x_center, 0.46), origin=(0, 0),
+                          scale=2.2 * tscale, color=accent)
+        self.coins = Text('$ 0', position=(x_center - 0.40 * s, 0.46), origin=(-0.5, 0),
+                          scale=1.6 * tscale, color=C_COIN)
+        self.over  = Text('', position=(x_center, 0.12), origin=(0, 0), scale=3 * tscale, color=color.red)
+        self.sub   = Text('', position=(x_center, 0.00), origin=(0, 0), scale=1.5 * tscale, color=color.white)
+        self.restart = Text('', position=(x_center, -0.12), origin=(0, 0), scale=1.4 * tscale, color=C_COIN)
+
+        # Herzen: jedes ist eine Liste von 1 Part (API-Kompatibilität zur alten Version)
+        self.hearts = []
+        for i in range(MAX_LIVES):
+            cx = x_center + (0.20 + i * 0.07) * s
+            cy = 0.445
+            part = Entity(parent=camera.ui, model='quad', texture=_HEART_FULL,
+                          color=color.white, scale=(0.05, 0.05), position=(cx, cy))
+            self.hearts.append([part])
+
+    def update(self, state):
+        """Score/Münzen/Herzen aus dem PlayerState übernehmen."""
+        self.score.text = str(state.score)
+        self.coins.text = f'$ {state.coins}'
+        for i, parts in enumerate(self.hearts):
+            tex = _HEART_FULL if i < state.lives else _HEART_EMPTY
+            for part in parts:
+                part.texture = tex
+
+    def show_game_over(self, state):
+        self.over.text    = 'GAME OVER'
+        self.sub.text     = f'Score: {state.score}   Münzen: {state.coins}'
+        self.restart.text = ''
+
+    def clear_game_over(self):
+        self.over.text = ''
+        self.sub.text = ''
+        self.restart.text = ''
+
+    def destroy(self):
+        from ursina import destroy
+        elems = [self.score, self.coins, self.over, self.sub, self.restart]
+        if self.name:
+            elems.append(self.name)
+        for e in elems:
+            destroy(e)
+        for parts in self.hearts:
+            for part in parts:
+                destroy(part)
+        self.hearts = []
 
 
 def update_hearts(hearts: list, lives: int):
-    """Aktualisiert die Herzanzeige oben rechts."""
-    for i, h in enumerate(hearts):
-        h.color = color.red if i < lives else Color(0.25, 0.10, 0.10, 1)
+    """Rückwärtskompatibler Helfer (Herzen einer HUD-Seite aktualisieren)."""
+    for i, parts in enumerate(hearts):
+        tex = _HEART_FULL if i < lives else _HEART_EMPTY
+        for part in parts:
+            part.texture = tex
+            part.color   = color.white

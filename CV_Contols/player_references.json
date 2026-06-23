@@ -1,0 +1,8 @@
+{
+  "0": {
+    "left_ratio": 0.33,
+    "right_ratio": 0.67,
+    "crouch_threshold": 55,
+    "jump_height_ratio": 0.72
+  }
+}

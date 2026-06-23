@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python generate_textures.py)",
+      "Bash(python -c \"import ursina, os; p = os.path.dirname\\(ursina.__file__\\); print\\(p\\); print\\('has textures:', os.path.isdir\\(os.path.join\\(p,'textures'\\)\\)\\)\")",
+      "Bash(python -c \"import os; p = r'C:\\\\Users\\\\freeg\\\\AppData\\\\Local\\\\Python\\\\pythoncore-3.14-64\\\\Lib\\\\site-packages\\\\ursina\\\\textures'; print\\(os.listdir\\(p\\)\\)\")",
+      "Bash(python -c \"import ursina, ursina.main, inspect; print\\([l for l in inspect.getsource\\(ursina.Ursina\\).split\\('\\\\n'\\) if 'icon' in l.lower\\(\\)]\\)\")",
+      "Bash(sort -k9)",
+      "Bash(python -c \"import ast; [ast.parse\\(open\\(f\\).read\\(\\)\\) for f in \\('player.py','subway_surfer.py','hud.py','world.py','obstacles.py'\\)]; print\\('OK'\\)\")",
+      "Bash(python -c \"import ursina; print\\('ursina version:', ursina.__version__ if hasattr\\(ursina, '__version__'\\) else 'unknown'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('player.py'\\).read\\(\\)\\); ast.parse\\(open\\('subway_surfer.py'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")",
+      "Bash(python -c \"import ast; [ast.parse\\(open\\(f\\).read\\(\\)\\) for f in \\('player.py','subway_surfer.py','obstacles.py','constants.py'\\)]; print\\('Syntax OK'\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python _inspect_cam.py)",
+      "Bash(python -c 'import ast,glob *)",
+      "Bash(python _smoke.py)",
+      "Bash(python _smoke2.py)",
+      "Bash(rm -f _smoke.py)"
+    ]
+  }
+}

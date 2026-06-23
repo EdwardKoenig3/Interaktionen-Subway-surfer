@@ -1,0 +1,18 @@
+{
+  "0": {
+    "left_ratio": 0.3333333333333333,
+    "right_ratio": 0.6666666666666666,
+    "crouch_threshold": 60,
+    "jump_height_ratio": 0.75,
+    "nose_y": 183.9228515625,
+    "body_height": 506.35107421875
+  },
+  "1": {
+    "left_ratio": 0.3333333333333333,
+    "right_ratio": 0.6666666666666666,
+    "crouch_threshold": 60,
+    "jump_height_ratio": 0.75,
+    "nose_y": 341.81884765625,
+    "body_height": 353.51434326171875
+  }
+}
