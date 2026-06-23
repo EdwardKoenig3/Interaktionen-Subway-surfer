@@ -1,30 +1,4 @@
-# import sounddevice as sd
-# from scipy.io import wavfile
-# import time
-# import os
-# from config import FS, REF_FILE
 
-# def record_reference():
-#     duration = 6
-#     print("\n" + "="*50)
-#     print("      STIMMEN-KALIBRIERUNG")
-#     print("="*50)
-#     print("Bitte sprich: LINKS - RECHTS - OBEN - UNTEN - MITTE - JUMP - SLIDE")
-    
-#     for i in range(3, 0, -1):
-#         print(f"Start in {i}...", end="\r")
-#         time.sleep(1)
-    
-#     print("JETZT SPRECHEN!          ")
-#     recording = sd.rec(int(duration * FS), samplerate=FS, channels=1, dtype='int16')
-#     sd.wait()
-#     wavfile.write(REF_FILE, FS, recording)
-#     print(f"\nReferenz gespeichert.\n")
-
-# def cleanup():
-#     if os.path.exists(REF_FILE):
-#         os.remove(REF_FILE)
-#         print(f"Sicherheits-Check: {REF_FILE} gelöscht.")
 
 import sounddevice as sd
 from scipy.io import wavfile
