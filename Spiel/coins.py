@@ -16,6 +16,7 @@ class Coin(Entity):
             scale=0.35,
             position=(LANES[lane], y, z),
         )
+        self.lane = lane
         self._dead = False
         self.prev_z = z   # z im letzten Frame (für die Sweep-Prüfung in collect)
 

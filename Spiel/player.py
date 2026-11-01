@@ -1,7 +1,7 @@
 from ursina import Entity, lerp, time
 from constants import (
     LANES, LANE_COUNT,
-    JUMP_VEL, GRAVITY, SLIDE_DUR, LANE_SPD,
+    JUMP_VEL, GRAVITY, SLIDE_DUR, FAST_DROP_VEL, LANE_SPD,
     PLAYER_BASE_Y, PLAYER_SY, PLAYER_HW, PLAYER_HH,
     PUSHBACK_DUR, PUSHBACK_DIST,
 )
@@ -38,6 +38,12 @@ class Player(Entity):
         self.is_sliding    = False
         self.slide_held    = False
         self.slide_timer   = 0.0
+        # In der Luft gedrücktes Ducken: startet bei der Landung (held = Taste gehalten)
+        self._slide_queued      = False
+        self._slide_queued_held = False
+        # Per OSC gewünschte Spur, die gerade nicht erreichbar ist (Zug im Weg,
+        # Zurückstoßen) – wird übernommen, sobald es geht
+        self.pending_lane  = None
         self._base_sy      = PLAYER_SY
         self._base_y       = PLAYER_BASE_Y
         self.platform      = None
@@ -104,20 +110,16 @@ class Player(Entity):
     def set_lane(self, lane: int):
         """Setzt die Zielspur direkt (für positionsbasierte Steuerung via OSC).
 
-        Alle Spuren auf dem Weg müssen frei sein – sonst würde der Spieler
-        bei links→rechts durch einen Zug in der Mitte laufen. Der Sender
-        wiederholt die Position, der Wechsel klappt also, sobald der Weg frei ist.
+        Ist der Weg gerade nicht frei (Zug auf der Zielspur oder dazwischen,
+        Zurückstoßen), merkt sich der Spieler die Spur und wechselt, sobald es
+        geht – oder bis ein neuer Spur-Befehl kommt. Wichtig für Sprache: die
+        sendet jeden Befehl nur einmal, er ging früher einfach verloren.
         """
-        if self._pb_timer > 0 or lane == self.lane:
-            return
-        step = 1 if lane > self.lane else -1
-        for l in range(self.lane + step, lane + step, step):
-            if not self._lane_passable(l):
-                return
-        self.lane     = lane
-        self.target_x = self._lane_x(lane)
+        self.pending_lane = lane
+        self._apply_pending_lane()
 
     def action_left(self):
+        self.pending_lane = None     # Tastatur steuert relativ – keine gemerkte Spur
         if self._pb_timer > 0:
             return
         if self.lane > 0 and self._lane_passable(self.lane - 1):
@@ -125,6 +127,7 @@ class Player(Entity):
             self.target_x = self._lane_x(self.lane)
 
     def action_right(self):
+        self.pending_lane = None
         if self._pb_timer > 0:
             return
         if self.lane < LANE_COUNT - 1 and self._lane_passable(self.lane + 1):
@@ -134,36 +137,40 @@ class Player(Entity):
     def action_jump(self):
         if self._pb_timer > 0:
             return
-        if self.is_sliding:
-            return
         # Sprung vom Boden ODER von einem Bus-/Zug-Dach (Plattform).
         # Steht der Spieler auf einer Plattform, ist is_jumping zwar False,
         # aber die Plattform-Bindung muss gelöst werden, damit er sauber
         # abhebt und auf eine andere Plattform hüpfen kann.
-        if not self.is_jumping or self.platform is not None:
-            self.vel_y      = JUMP_VEL
-            self.is_jumping = True
-            self.platform   = None
+        if self.is_jumping and self.platform is None:
+            return                       # schon in der Luft
+        # Sprung aus dem Ducken: sofort aufstehen und abspringen
+        # (früher wurde der Sprung hier verworfen – und das Ducken trotzdem beendet)
+        if self.is_sliding:
+            self._end_slide()
+        self.vel_y      = JUMP_VEL
+        self.is_jumping = True
+        self.platform   = None
 
     def action_slide(self):
-        """Einmaliger Slide (für OSC/Kamera): läuft nach SLIDE_DUR automatisch aus."""
+        """Einmaliger Slide (für OSC/Kamera): läuft nach SLIDE_DUR automatisch aus.
+        In der Luft: schnell nach unten fallen und bei der Landung ducken."""
         if self._pb_timer > 0:
             return
-        if not self.is_jumping and not self.is_sliding:
-            self.is_sliding  = True
-            self.slide_timer = SLIDE_DUR
-            self.scale_y     = self._base_sy * 0.45
-            self.y           = self._slide_y()
+        if self.is_jumping:
+            self._queue_slide(held=False)
+        elif not self.is_sliding:
+            self._begin_slide(held=False)
 
     def start_slide(self):
-        """Slide beginnen und halten (Taste gedrückt halten). Endet erst bei stop_slide()."""
+        """Slide beginnen und halten (Taste gedrückt halten). Endet erst bei stop_slide().
+        In der Luft: schnell nach unten fallen, Slide startet bei der Landung."""
         if self._pb_timer > 0:
             return
-        if not self.is_jumping:
-            if not self.is_sliding:
-                self.is_sliding = True
-                self.scale_y    = self._base_sy * 0.45
-                self.y          = self._slide_y()
+        if self.is_jumping:
+            self._queue_slide(held=True)
+        elif not self.is_sliding:
+            self._begin_slide(held=True)
+        else:
             self.slide_held  = True
             self.slide_timer = SLIDE_DUR
 
@@ -171,6 +178,9 @@ class Player(Entity):
         """Slide sofort beenden (Taste losgelassen)."""
         self.slide_held  = False
         self.slide_timer = 0.0
+        # Taste schon vor der Landung losgelassen → kein Slide mehr bei der Landung
+        if self._slide_queued and self._slide_queued_held:
+            self._slide_queued = False
 
     def action_stand(self):
         """Neutralpose-Signal (für Gestensteuerung).
@@ -185,9 +195,54 @@ class Player(Entity):
 
     def pushback(self):
         """Startet die Zurückzieh-Animation nach einer Kollision."""
-        self._pb_timer = PUSHBACK_DUR
+        self._pb_timer     = PUSHBACK_DUR
+        self._slide_queued = False   # während des Zurückstoßens wird nicht geduckt
 
     # ── Hilfsmethoden ─────────────────────────────────────────────────
+
+    def _begin_slide(self, held: bool):
+        self.is_sliding  = True
+        self.slide_held  = held
+        self.slide_timer = SLIDE_DUR
+        self.scale_y     = self._base_sy * 0.45
+        self.y           = self._slide_y()
+
+    def _end_slide(self):
+        self.is_sliding  = False
+        self.slide_held  = False
+        self.slide_timer = 0.0
+        self.scale_y     = self._base_sy
+        # In der Luft (geduckt vom Dach gefallen) nicht auf den Boden setzen –
+        # der Fall läuft normal weiter
+        if not self.is_jumping:
+            self.y = self._floor()
+
+    def _queue_slide(self, held: bool):
+        """Ducken in der Luft: sofort schnell nach unten (wie bei Subway Surfers),
+        der Slide selbst startet bei der Landung (Boden oder Dach)."""
+        self._slide_queued      = True
+        self._slide_queued_held = held
+        self.vel_y = min(self.vel_y, -FAST_DROP_VEL)
+
+    def _apply_pending_lane(self):
+        """Gemerkte Zielspur übernehmen, sobald möglich: nicht während des
+        Zurückstoßens und nur, wenn alle Spuren auf dem Weg frei sind – sonst
+        würde der Spieler bei links→rechts durch einen Zug in der Mitte laufen."""
+        lane = self.pending_lane
+        if lane is None:
+            return
+        if lane == self.lane:
+            self.pending_lane = None
+            return
+        if self._pb_timer > 0:
+            return
+        step = 1 if lane > self.lane else -1
+        for l in range(self.lane + step, lane + step, step):
+            if not self._lane_passable(l):
+                return
+        self.lane         = lane
+        self.target_x     = self._lane_x(lane)
+        self.pending_lane = None
 
     def _lane_passable(self, lane_idx: int) -> bool:
         """
@@ -249,6 +304,9 @@ class Player(Entity):
         else:
             self.z = 0.0
 
+        # ── Gemerkte Spur (OSC) übernehmen, sobald der Weg frei ist ───
+        self._apply_pending_lane()
+
         # ── Seitliche Bewegung ────────────────────────────────────────
         self.x = lerp(self.x, self.target_x, min(LANE_SPD * dt, 1))
 
@@ -282,13 +340,17 @@ class Player(Entity):
                 self.is_jumping = False
                 self.platform   = None
 
+        # ── In der Luft gedrücktes Ducken bei der Landung starten ─────
+        # (Landung auf dem Boden: oben; auf einem Dach: in _check_collisions)
+        if self._slide_queued and not self.is_jumping:
+            self._slide_queued = False
+            if not self.is_sliding:
+                self._begin_slide(held=self._slide_queued_held)
+
         # ── Slide-Timer ───────────────────────────────────────────────
         # Wenn Taste gehalten (slide_held), läuft der Timer nicht ab.
         if self.is_sliding:
             if not self.slide_held:
                 self.slide_timer -= dt
             if self.slide_timer <= 0:
-                self.is_sliding  = False
-                self.slide_held  = False
-                self.scale_y     = self._base_sy
-                self.y           = self._floor()
+                self._end_slide()

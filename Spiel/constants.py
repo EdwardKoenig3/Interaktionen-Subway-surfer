@@ -56,6 +56,7 @@ MAX_SPD     = INITIAL_SPD + SPEED_INC * MAX_SPD_AFTER   # Obergrenze (= 168)
 
 # ── Punkte ────────────────────────────────────────────────────────────
 COIN_SCORE  = 100     # Punkte pro Münze (Score = Distanz + Münzen × COIN_SCORE)
+COIN_CLEARANCE = 0.4  # Mindestabstand einer Münze zur Kollisionsbox eines Hindernisses
 
 # ── Spieler ───────────────────────────────────────────────────────────
 # Sprung: kalibriert so dass Spieler Autos (Dach 1.3) locker überspringt,
@@ -65,6 +66,7 @@ COIN_SCORE  = 100     # Punkte pro Münze (Score = Distanz + Münzen × COIN_SCO
 JUMP_VEL      = 8.2
 GRAVITY       = -18.0
 SLIDE_DUR     = 1.5
+FAST_DROP_VEL = 15.0    # Ducken in der Luft: sofort mit dieser Geschwindigkeit nach unten
 LANE_SPD      = 18.0
 PLAYER_BASE_Y = 0.75
 PLAYER_SY     = 1.0     # Körperhöhe

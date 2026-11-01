@@ -49,6 +49,8 @@ class StartMenu:
 
     # ── Anzeige ──────────────────────────────────────────────────────
     def refresh(self):
+        # Überschrift nur im 2-Spieler-Modus
+        self.title.text = 'MULTIPLAYER' if self.mode == 2 else ''
         self.mode_line.text = f'Modus:  {self.mode} Spieler'
         if self.mode == 1:
             self.left_line.text  = f'Spieler:  {SRC_LABEL[self.left_src]}'

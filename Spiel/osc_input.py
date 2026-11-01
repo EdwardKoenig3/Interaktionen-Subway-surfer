@@ -178,7 +178,9 @@ def poll_actions(player, source: str) -> None:
 
     `source` ist "vision" oder "voice". Slide und Sprung sind zeit-/impulsbasiert
     und laufen vollständig durch – eine reale Geste ist kürzer als die in-Game-
-    Animation, deshalb wird sie NICHT durch nachfolgende OSC-Events abgebrochen.
+    Animation, deshalb bricht "stand" sie NICHT ab. Ausnahmen (siehe Player):
+    ein Sprung beendet ein laufendes Ducken, Ducken in der Luft lässt die Figur
+    schnell fallen. Spuren werden gemerkt, falls der Weg gerade blockiert ist.
     """
     q = _queues.get(source)
     if q is None:
@@ -194,8 +196,7 @@ def poll_actions(player, source: str) -> None:
             player.set_lane(msg[1])
         elif kind == "action":
             if msg[1] == "jump":
-                player.stop_slide()
-                player.action_jump()
+                player.action_jump()    # beendet ein laufendes Ducken selbst
             if msg[1] == "slide":
                 player.action_slide()
             if msg[1] == "stand":

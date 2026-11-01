@@ -40,7 +40,7 @@ from constants import (
     SPEED_INC, MAX_SPD, JUMP_VEL, GRAVITY,
     PLAYER_BASE_Y, PLAYER_SY,
     TRAIN_TOP,
-    INVINCIBLE, COIN_SCORE,
+    INVINCIBLE, COIN_SCORE, COIN_CLEARANCE,
 )
 from game_state  import GS, PlayerState
 from player      import Player
@@ -189,28 +189,63 @@ def _spawn_obstacle() -> bool:
         lane = _draw_lane(used)
         if lane is None:
             break
-        obstacles.append(Obstacle(lane, _pick_kind(lane)))
+        o = Obstacle(lane, _pick_kind(lane))
+        obstacles.append(o)
+        _remove_coins_inside(o)
         used.add(lane)
     return bool(used)
 
 
-def _spawn_coins():
-    lane = random.randint(0, LANE_COUNT - 1)
+# ── Münzen ────────────────────────────────────────────────────────────
+# Münzen dürfen nicht IN einem Hindernis liegen (unerreichbar). ÜBER einem
+# Hindernis sind sie erlaubt – z.B. ein Münzbogen über ein Auto.
+
+def _inside_obstacle(o: Obstacle, lane: int, z: float, y: float) -> bool:
+    return (not o._dead and o.lane == lane
+            and abs(o.z - z) < o.hz + COIN_CLEARANCE
+            and abs(o.y - y) < o.hh + COIN_CLEARANCE)
+
+
+def _coin_blocked(lane: int, z: float, y: float) -> bool:
+    return any(_inside_obstacle(o, lane, z, y) for o in obstacles)
+
+
+def _remove_coins_inside(o: Obstacle):
+    """Münzen entfernen, in denen ein gerade gespawntes Hindernis stecken würde.
+    Nötig, weil lange Münzbögen bei hohem Tempo weit hinter den Spawnpunkt reichen."""
+    for c in coins:
+        if not c._dead and _inside_obstacle(o, c.lane, c.z, c.y):
+            c._dead = True
+            destroy(c)
+
+
+def _coin_pattern() -> list[tuple[float, float]]:
+    """(z, y)-Positionen einer zufälligen Münzgruppe."""
     mode = random.choices(['line', 'arc', 'high'], weights=[4, 4, 2])[0]
     if mode == 'arc':
         T = 2 * JUMP_VEL / abs(GRAVITY)
         n = 7
+        pattern = []
         for i in range(n):
             t = T * i / (n - 1)
             y = PLAYER_BASE_Y + JUMP_VEL * t + 0.5 * GRAVITY * t ** 2
-            z = SPAWN_Z + GS.speed * t
-            coins.append(Coin(lane, z, y=max(y, PLAYER_BASE_Y + 0.1)))
-    elif mode == 'high':
-        for i in range(random.randint(3, 5)):
-            coins.append(Coin(lane, SPAWN_Z + i * 1.8, y=TRAIN_TOP + 0.45))
-    else:
-        for i in range(random.randint(3, 6)):
-            coins.append(Coin(lane, SPAWN_Z + i * 1.7, y=1.0))
+            pattern.append((SPAWN_Z + GS.speed * t, max(y, PLAYER_BASE_Y + 0.1)))
+        return pattern
+    if mode == 'high':
+        return [(SPAWN_Z + i * 1.8, TRAIN_TOP + 0.45) for i in range(random.randint(3, 5))]
+    return [(SPAWN_Z + i * 1.7, 1.0) for i in range(random.randint(3, 6))]
+
+
+def _spawn_coins():
+    """Münzgruppe in die Spur, in der am wenigsten Münzen in Hindernissen
+    stecken würden (bei Gleichstand zufällig). Münzen, die trotzdem in einem
+    Hindernis lägen, entfallen."""
+    pattern = _coin_pattern()
+    lanes = random.sample(range(LANE_COUNT), LANE_COUNT)
+    lane = min(lanes, key=lambda l: sum(_coin_blocked(l, z, y) for z, y in pattern))
+    for z, y in pattern:
+        if not _coin_blocked(lane, z, y):
+            coins.append(Coin(lane, z, y=y))
 
 
 # ── Kollision (pro Spieler, geteilte Hindernisse + Münzen) ────────────

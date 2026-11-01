@@ -17,6 +17,9 @@ RESET_HOLD_S = 1.0               # so lange muss der Reset-Arm oben bleiben
 START_HOLD_S = 1.0               # so lange müssen beide Arme für die Start-Geste oben bleiben
 TRACK_MAX_DIST_FRACTION = 0.5    # max. Hüft-Sprung pro Frame (Anteil der Körperhöhe)
 TRACK_MAX_DIST_FALLBACK = 150    # dasselbe in Pixeln, solange keine Körperhöhe bekannt
+# Ist der Spieler verloren, wächst der Suchradius um so viele Pixel pro Sekunde –
+# so wird er wiedergefunden, auch wenn er sich während des Aussetzers bewegt hat.
+TRACK_REGAIN_PX_PER_S = 600
 
 
 def _load_network_config() -> tuple[str, int]:
@@ -116,13 +119,15 @@ def main() -> None:
     reset_arm_since = None
     start_arms_since = None
     start_sent = False
+    lost_since = None           # Zeitpunkt, seit dem der Spieler nicht gefunden wird
 
     def select(idx: int, huefte_x: float, huefte_y: float, how: str) -> None:
         nonlocal selected_person, selected_position, selected_reference
         nonlocal calib_deadline, reset_arm_since, position, zustand, last_zustand
-        nonlocal start_arms_since, start_sent
+        nonlocal start_arms_since, start_sent, lost_since
         start_arms_since = None
         start_sent = False
+        lost_since = None
         selected_person = idx
         selected_position = (huefte_x, huefte_y)
         selected_reference = tracker.load_reference()
@@ -137,10 +142,12 @@ def main() -> None:
 
     def deselect(reason: str) -> None:
         nonlocal selected_person, selected_position, selected_reference, reset_arm_since
+        nonlocal lost_since
         selected_person = None
         selected_position = None
         selected_reference = None
         reset_arm_since = None
+        lost_since = None
         print(f"{reason} – zurück in Auswahlmodus")
 
     while True:
@@ -180,15 +187,26 @@ def main() -> None:
             continue
 
         # ── Tracking-Modus ───────────────────────────────────────────────
+        # Suchradius um die letzte bekannte Position. Solange der Spieler
+        # verloren ist, wächst er mit der Zeit. Die Kalibrierung bleibt dabei
+        # erhalten – nach dem Wiederfinden geht es ohne Countdown weiter.
         body_h = selected_reference.get("body_height")
         max_dist = body_h * TRACK_MAX_DIST_FRACTION if body_h else TRACK_MAX_DIST_FALLBACK
+        if lost_since is not None:
+            max_dist += TRACK_REGAIN_PX_PER_S * (now - lost_since)
         best_person = tracker.find_best_person(persons, selected_position, max_dist) if persons else None
 
         if best_person is None:
-            tracker.draw_no_person(annotated, h)
+            if lost_since is None:
+                lost_since = now
+                print("Spieler verloren – suche weiter (Kalibrierung bleibt erhalten)")
+            tracker.draw_player_lost(annotated, h)
             reset_arm_since = None
             start_arms_since = None
         else:
+            if lost_since is not None:
+                print(f"Spieler nach {now - lost_since:.1f} s wiedergefunden")
+                lost_since = None
             person_kpts, huefte_x, huefte_y = best_person
             selected_position = (huefte_x, huefte_y)
 
@@ -197,13 +215,13 @@ def main() -> None:
                 remaining = calib_deadline - now
                 if remaining > 0:
                     tracker.draw_countdown(annotated, remaining, h, w)
-                elif person_kpts[0][1] > 0:
+                elif tracker.visible(person_kpts[0]):
+                    # Nur im Speicher – wird bei jeder Auswahl neu gemessen,
+                    # daher nicht mehr in player_references.json geschrieben
                     selected_reference["nose_y"] = float(person_kpts[0][1])
-                    measured_h = tracker.measure_body_height(person_kpts)
-                    if measured_h:
-                        selected_reference["body_height"] = measured_h
-                    tracker.save_reference(selected_reference)
-                    bh_txt = f"{measured_h:.1f}" if measured_h else "n/a (Knöchel nicht sichtbar → Pixel-Fallback)"
+                    measured_h, quelle = tracker.measure_body_height(person_kpts)
+                    selected_reference["body_height"] = measured_h
+                    bh_txt = f"{measured_h:.1f} ({quelle})" if measured_h else f"n/a ({quelle}) → Pixel-Fallback"
                     print(f"Kalibriert: nose_y={selected_reference['nose_y']:.1f}, body_height={bh_txt}")
             else:
                 position, zustand = tracker.analyze_person(
