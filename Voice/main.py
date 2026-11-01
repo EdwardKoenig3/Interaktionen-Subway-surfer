@@ -1,4 +1,5 @@
 
+import argparse
 import queue
 import json
 import time
@@ -27,9 +28,16 @@ def audio_callback(indata, frames, time_info, status):
 
 def main():
 
-    print(f"Verbinde mit OSC: {config.IP}:{config.PORT}")
+    parser = argparse.ArgumentParser(description="Sprachsteuerung für Subway Surfer")
+    parser.add_argument("--ip", type=str, default=config.IP,
+                        help=f"IP des Spiel-Rechners. Default aus network.json: {config.IP}")
+    parser.add_argument("--port", type=int, default=config.PORT,
+                        help=f"OSC-Port des Spiels. Default aus network.json: {config.PORT}")
+    args = parser.parse_args()
 
-    client = SimpleUDPClient(config.IP, config.PORT)
+    print(f"Verbinde mit OSC: {args.ip}:{args.port}")
+
+    client = SimpleUDPClient(args.ip, args.port)
 
     # Modell laden
     try:

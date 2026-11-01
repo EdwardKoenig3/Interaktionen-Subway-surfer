@@ -14,15 +14,19 @@ Zwei getrennte Namespaces, damit zwei Spieler unabhängig gesteuert werden:
 Die alten Adressen ohne Präfix (/game/left, /game/jump, …) werden weiterhin auf
 den Vision-Spieler gemappt (Rückwärtskompatibilität für bestehende Sender).
 
-Beispiel-Sender:
+Beispiel-Sender (gleicher Rechner → "127.0.0.1", sonst IP des Spiel-Rechners):
     from pythonosc.udp_client import SimpleUDPClient
-    client = SimpleUDPClient("192.168.137.1", 9000)
+    client = SimpleUDPClient("127.0.0.1", 9000)
     client.send_message("/game/vision/center", [])
     client.send_message("/game/voice/jump", [])
+
+Der Port kommt aus network.json im Projekt-Root (Standard 9000).
 """
 
+import json
 import queue
 import threading
+from pathlib import Path
 
 try:
     from pythonosc.dispatcher import Dispatcher
@@ -31,8 +35,23 @@ try:
 except ImportError:
     _OSC_AVAILABLE = False
 
-OSC_IP   = "0.0.0.0"     # auf allen Netzwerk-Interfaces lauschen
-OSC_PORT = 9000
+_NETWORK_FILE = Path(__file__).resolve().parent.parent / "network.json"
+
+
+def _load_port(default: int = 9000) -> int:
+    try:
+        return int(json.loads(_NETWORK_FILE.read_text(encoding="utf-8")).get("port", default))
+    except FileNotFoundError:
+        return default
+    except (json.JSONDecodeError, ValueError, OSError) as e:
+        print(f"[OSC] {_NETWORK_FILE.name} fehlerhaft ({e}) – nutze Port {default}")
+        return default
+
+
+# 0.0.0.0 = auf allen Interfaces lauschen: empfängt sowohl lokal (127.0.0.1)
+# als auch von anderen Rechnern im Netz
+OSC_IP   = "0.0.0.0"
+OSC_PORT = _load_port()
 
 # Eine Queue pro Steuerquelle
 _queues: dict[str, queue.Queue] = {

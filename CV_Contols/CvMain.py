@@ -1,9 +1,29 @@
 import argparse
+import json
+from pathlib import Path
 import cv2
 import torch
 from ultralytics import YOLO
 from pythonosc.udp_client import SimpleUDPClient
 import tracker
+
+_PROJECT_DIR = Path(__file__).resolve().parent.parent
+_NETWORK_FILE = _PROJECT_DIR / "network.json"
+_YOLO_MODEL = _PROJECT_DIR / "yolo26n-pose.pt"
+
+
+def _load_network_config() -> tuple[str, int]:
+    """Ziel-IP und Port aus network.json lesen. Fehlt die Datei: 127.0.0.1:9000."""
+    ip, port = "127.0.0.1", 9000
+    try:
+        data = json.loads(_NETWORK_FILE.read_text(encoding="utf-8"))
+        ip = data.get("target_ip", ip)
+        port = int(data.get("port", port))
+    except FileNotFoundError:
+        pass
+    except (json.JSONDecodeError, ValueError, OSError) as e:
+        print(f"[Netzwerk] {_NETWORK_FILE.name} fehlerhaft ({e}) – nutze {ip}:{port}")
+    return ip, port
 
 
 def _pick_device(override: str) -> str:
@@ -16,6 +36,7 @@ def _pick_device(override: str) -> str:
 
 
 def main() -> None:
+    default_ip, default_port = _load_network_config()
     parser = argparse.ArgumentParser(description="Pose Tracking mit Webcam oder Link to Windows Kamera")
     parser.add_argument("--camera", type=int, default=0,
                         help="Kamera-Index: 0=integrierte Webcam, 1=erste externe Kamera, 2=nächste verfügbare Kamera (z.B. Handy)")
@@ -27,11 +48,14 @@ def main() -> None:
                         help="Kamera-Aufnahmebreite in Pixeln. Default 1280.")
     parser.add_argument("--cam-height", type=int, default=720,
                         help="Kamera-Aufnahmehöhe in Pixeln. Default 720.")
+    parser.add_argument("--ip", type=str, default=default_ip,
+                        help=f"IP des Spiel-Rechners. Default aus network.json: {default_ip}")
+    parser.add_argument("--port", type=int, default=default_port,
+                        help=f"OSC-Port des Spiels. Default aus network.json: {default_port}")
     args = parser.parse_args()
 
-    IP = "192.168.137.1"
-    PORT = 9000
-    client = SimpleUDPClient(IP, PORT)
+    client = SimpleUDPClient(args.ip, args.port)
+    print(f"Sende OSC an {args.ip}:{args.port}")
 
     device = _pick_device(args.device)
     print(f"PyTorch: {torch.__version__} | CUDA verfügbar: {torch.cuda.is_available()}")
@@ -45,7 +69,7 @@ def main() -> None:
     else:
         print("Verwende CPU.")
 
-    model = YOLO("yolo26n-pose.pt")
+    model = YOLO(str(_YOLO_MODEL))
     try:
         model.to(device)
     except Exception as e:

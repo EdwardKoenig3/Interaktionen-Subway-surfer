@@ -6,6 +6,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 TrackedPerson = Tuple[int, Any, float, float]
 
+# Liegt neben tracker.py – unabhängig davon, aus welchem Ordner gestartet wird
+_REFERENCE_FILE = str(Path(__file__).resolve().parent / "player_references.json")
+
 
 # ── Zustandsschwellen ─────────────────────────────────────────────────
 # Anteil der kalibrierten Körperhöhe (Nase→Knöchel). Dadurch auflösungs-
@@ -46,7 +49,7 @@ def get_default_reference() -> Dict[str, float]:
     return DEFAULT_REFERENCE.copy()
 
 
-def load_player_reference(player_id: int, filename: str = "player_references.json") -> Dict[str, float]:
+def load_player_reference(player_id: int, filename: str = _REFERENCE_FILE) -> Dict[str, float]:
     path = Path(filename)
     if not path.exists():
         return get_default_reference()
@@ -60,7 +63,7 @@ def load_player_reference(player_id: int, filename: str = "player_references.jso
     return data.get(str(player_id), get_default_reference())
 
 
-def save_player_reference(player_id: int, reference: Dict[str, float], filename: str = "player_references.json") -> None:
+def save_player_reference(player_id: int, reference: Dict[str, float], filename: str = _REFERENCE_FILE) -> None:
     path = Path(filename)
     try:
         if path.exists():
