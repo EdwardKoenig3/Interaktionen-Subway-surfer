@@ -1,5 +1,6 @@
 import argparse
 import json
+import time
 from pathlib import Path
 import cv2
 import torch
@@ -10,6 +11,11 @@ import tracker
 _PROJECT_DIR = Path(__file__).resolve().parent.parent
 _NETWORK_FILE = _PROJECT_DIR / "network.json"
 _YOLO_MODEL = _PROJECT_DIR / "yolo26n-pose.pt"
+
+CALIB_DELAY_S = 3.0              # Countdown nach der Auswahl, dann Nasenhöhe messen
+RESET_HOLD_S = 1.0               # so lange muss der Reset-Arm oben bleiben
+TRACK_MAX_DIST_FRACTION = 0.5    # max. Hüft-Sprung pro Frame (Anteil der Körperhöhe)
+TRACK_MAX_DIST_FALLBACK = 150    # dasselbe in Pixeln, solange keine Körperhöhe bekannt
 
 
 def _load_network_config() -> tuple[str, int]:
@@ -90,17 +96,45 @@ def main() -> None:
     real_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     print(f"Kameraauflösung: {real_w}x{real_h} | YOLO imgsz: {args.imgsz}")
 
-    print("Tracking läuft. Mit 'q' beenden. Drücke 'r' für Auswahlmodus oder hebe die Arme für Auswahl.")
+    print("Tracking läuft. Mit 'q' beenden. 'r' = Auswahlmodus. "
+          "Auswahl: linken Arm heben (YOLO-links) oder Taste 0-9. "
+          f"Reset: rechten Arm {RESET_HOLD_S:.0f} s oben halten.")
 
     cv2.namedWindow("Pose Tracking", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("Pose Tracking", 1920, 1080)
+
+    lane_sender = tracker.LaneSender(client)
     position = "MITTE"
     zustand = "STEHT"
     last_zustand = "STEHT"
-    selected_person = None
-    selected_position = None
+    selected_person = None      # YOLO-Index bei der Auswahl (nur zur Anzeige)
+    selected_position = None    # None = Auswahlmodus
     selected_reference = None
-    selection_made = False
+    calib_deadline = 0.0
+    reset_arm_since = None
+
+    def select(idx: int, huefte_x: float, huefte_y: float, how: str) -> None:
+        nonlocal selected_person, selected_position, selected_reference
+        nonlocal calib_deadline, reset_arm_since, position, zustand, last_zustand
+        selected_person = idx
+        selected_position = (huefte_x, huefte_y)
+        selected_reference = tracker.load_reference()
+        # Nasen- und Körperhöhe werden nach dem Countdown neu gemessen
+        selected_reference["nose_y"] = None
+        selected_reference["body_height"] = None
+        calib_deadline = time.monotonic() + CALIB_DELAY_S
+        reset_arm_since = None
+        position, zustand, last_zustand = "MITTE", "STEHT", "STEHT"
+        lane_sender.reset()
+        print(f"Spieler {idx} {how} ausgewählt – Kalibrierung in {CALIB_DELAY_S:.0f} s")
+
+    def deselect(reason: str) -> None:
+        nonlocal selected_person, selected_position, selected_reference, reset_arm_since
+        selected_person = None
+        selected_position = None
+        selected_reference = None
+        reset_arm_since = None
+        print(f"{reason} – zurück in Auswahlmodus")
 
     while True:
         ret, frame = cap.read()
@@ -114,11 +148,10 @@ def main() -> None:
         annotated = results[0].plot()
 
         persons = tracker.extract_persons(results)
+        now = time.monotonic()
 
-        if not selection_made:
-            # Kontinuierlicher Auswahlmodus: kein gefrorenes Bild mehr.
-            # Zeichne Indizes und Prompt, zeige Frame und prüfe auf Tastendruck
-            # oder Armheben zur Auswahl.
+        if selected_position is None:
+            # ── Auswahlmodus ─────────────────────────────────────────────
             tracker.draw_person_indices(annotated, persons)
             tracker.draw_selection_prompt(annotated, h, persons)
             cv2.imshow("Pose Tracking", annotated)
@@ -129,60 +162,56 @@ def main() -> None:
             # Tastenauswahl (0-9)
             selected = tracker.select_person_by_key(key, persons)
             if selected is not None:
-                selected_person = selected[0]
-                selected_position = (selected[2], selected[3])
-                selected_reference = tracker.load_player_reference(selected_person)
-                # Nasenhöhe + Körperhöhe zurücksetzen, um sie neu zu messen
-                selected_reference["nose_y"] = None
-                selected_reference["body_height"] = None
-                selection_made = True
-                position = "MITTE"
-                zustand = "STEHT"
-                last_zustand = "STEHT"
-                print(f"Spieler {selected_person} ausgewählt")
-                print(f"Verwende Referenz für Spieler {selected_person}: {selected_reference}")
+                select(selected[0], selected[2], selected[3], "per Taste")
                 continue
 
-            # Auswahl per Armheben: wenn eine erkannte Person beide Arme hebt,
-            # wird diese Person als selektiert übernommen.
+            # Auswahl per Armheben (linkes Handgelenk laut YOLO)
             for idx, person_kpts, huefte_x, huefte_y in persons:
-                if tracker.right_arm_raised(person_kpts):
-                    selected_person = idx
-                    selected_position = (huefte_x, huefte_y)
-                    selected_reference = tracker.load_player_reference(selected_person)
-                    selected_reference["nose_y"] = None
-                    selected_reference["body_height"] = None
-                    selection_made = True
-                    position = "MITTE"
-                    zustand = "STEHT"
-                    last_zustand = "STEHT"
-                    print(f"Spieler {selected_person} per Armheben ausgewählt")
-                    print(f"Verwende Referenz für Spieler {selected_person}: {selected_reference}")
+                if tracker.wrist_raised(person_kpts, "left"):
+                    select(idx, huefte_x, huefte_y, "per Armheben")
                     break
             continue
 
-        if persons and selected_position is not None:
-            best_person = tracker.find_best_person(persons, selected_position)
-            if best_person is not None:
-                person_kpts, huefte_x, huefte_y = best_person
-                selected_position = (huefte_x, huefte_y)
-                
-                # Nasen- + Körperhöhe beim ersten Frame im Stand kalibrieren
-                if selected_reference.get("nose_y") is None and person_kpts[0][1] > 0:
-                    selected_reference["nose_y"] = float(person_kpts[0][1])
-                    body_h = tracker.measure_body_height(person_kpts)
-                    if body_h:
-                        selected_reference["body_height"] = body_h
-                    tracker.save_player_reference(selected_person, selected_reference)
-                    bh_txt = f"{body_h:.1f}" if body_h else "n/a (Knöchel nicht sichtbar → Pixel-Fallback)"
-                    print(f"Kalibriert Spieler {selected_person}: "
-                          f"nose_y={selected_reference['nose_y']:.1f}, body_height={bh_txt}")
-                
-                position, zustand = tracker.analyze_person(person_kpts, h, w, client, position, selected_reference, last_zustand)
-                last_zustand = zustand
-                tracker.draw_player_status(annotated, huefte_x, huefte_y, position, zustand)
-        elif not persons:
+        # ── Tracking-Modus ───────────────────────────────────────────────
+        body_h = selected_reference.get("body_height")
+        max_dist = body_h * TRACK_MAX_DIST_FRACTION if body_h else TRACK_MAX_DIST_FALLBACK
+        best_person = tracker.find_best_person(persons, selected_position, max_dist) if persons else None
+
+        if best_person is None:
             tracker.draw_no_person(annotated, h)
+            reset_arm_since = None
+        else:
+            person_kpts, huefte_x, huefte_y = best_person
+            selected_position = (huefte_x, huefte_y)
+
+            if selected_reference.get("nose_y") is None:
+                # Countdown, damit der Spieler Zeit hat, sich in Spielposition zu stellen
+                remaining = calib_deadline - now
+                if remaining > 0:
+                    tracker.draw_countdown(annotated, remaining, h, w)
+                elif person_kpts[0][1] > 0:
+                    selected_reference["nose_y"] = float(person_kpts[0][1])
+                    measured_h = tracker.measure_body_height(person_kpts)
+                    if measured_h:
+                        selected_reference["body_height"] = measured_h
+                    tracker.save_reference(selected_reference)
+                    bh_txt = f"{measured_h:.1f}" if measured_h else "n/a (Knöchel nicht sichtbar → Pixel-Fallback)"
+                    print(f"Kalibriert: nose_y={selected_reference['nose_y']:.1f}, body_height={bh_txt}")
+            else:
+                position, zustand = tracker.analyze_person(
+                    person_kpts, h, w, client, lane_sender, selected_reference, last_zustand)
+                last_zustand = zustand
+            tracker.draw_player_status(annotated, huefte_x, huefte_y, position, zustand)
+
+            # Reset nur durch den Spieler selbst und nur, wenn der rechte Arm
+            # RESET_HOLD_S oben bleibt – kurzes Armhochreißen beim Sprung zählt nicht.
+            if tracker.wrist_raised(person_kpts, "right", selected_reference.get("body_height")):
+                if reset_arm_since is None:
+                    reset_arm_since = now
+                elif now - reset_arm_since >= RESET_HOLD_S:
+                    deselect("Armheben erkannt")
+            else:
+                reset_arm_since = None
 
         tracker.draw_tracking_help(annotated, h)
         tracker.draw_selected_player(annotated, selected_person, h)
@@ -196,28 +225,10 @@ def main() -> None:
 
         cv2.imshow("Pose Tracking", annotated)
         key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
+        if key == ord('q') or key == 27:
             break
-        if key == ord('r'):
-            selection_made = False
-            selected_person = None
-            selected_position = None
-            position = "MITTE"
-            zustand = "STEHT"
-            last_zustand = "STEHT"
-            selected_reference = None
-            print("Zurück in Auswahlmodus")
-        
-        for idx, person_kpts, huefte_x, huefte_y in persons:
-            if tracker.left_arm_raised(person_kpts):
-                print("Armheben erkannt, zurück in Auswahlmodus")
-                selection_made = False
-                selected_person = None
-                selected_position = None
-                position = "MITTE"
-                zustand = "STEHT"
-                last_zustand = "STEHT"
-                selected_reference = None
+        if key == ord('r') and selected_position is not None:
+            deselect("Taste r")
 
     cap.release()
     cv2.destroyAllWindows()

@@ -105,12 +105,20 @@ class Player(Entity):
         return LANES[lane] + self.x_offset
 
     def set_lane(self, lane: int):
-        """Setzt die Zielspur direkt (für positionsbasierte Steuerung via OSC)."""
+        """Setzt die Zielspur direkt (für positionsbasierte Steuerung via OSC).
+
+        Alle Spuren auf dem Weg müssen frei sein – sonst würde der Spieler
+        bei links→rechts durch einen Zug in der Mitte laufen. Der Sender
+        wiederholt die Position, der Wechsel klappt also, sobald der Weg frei ist.
+        """
         if self._pb_timer > 0 or lane == self.lane:
             return
-        if self._lane_passable(lane):
-            self.lane     = lane
-            self.target_x = self._lane_x(lane)
+        step = 1 if lane > self.lane else -1
+        for l in range(self.lane + step, lane + step, step):
+            if not self._lane_passable(l):
+                return
+        self.lane     = lane
+        self.target_x = self._lane_x(lane)
 
     def action_left(self):
         if self._pb_timer > 0:
@@ -148,7 +156,7 @@ class Player(Entity):
             self.is_sliding  = True
             self.slide_timer = SLIDE_DUR
             self.scale_y     = self._base_sy * 0.45
-            self.y           = self._base_y - self._base_sy * 0.27
+            self.y           = self._slide_y()
 
     def start_slide(self):
         """Slide beginnen und halten (Taste gedrückt halten). Endet erst bei stop_slide()."""
@@ -158,7 +166,7 @@ class Player(Entity):
             if not self.is_sliding:
                 self.is_sliding = True
                 self.scale_y    = self._base_sy * 0.45
-                self.y          = self._base_y - self._base_sy * 0.27
+                self.y          = self._slide_y()
             self.slide_held  = True
             self.slide_timer = SLIDE_DUR
 
@@ -201,16 +209,31 @@ class Player(Entity):
     def half_extents(self):
         return PLAYER_HW, self.scale_y * PLAYER_HH
 
-    def _floor(self) -> float:
-        """Bodenhöhe: Zugdach wenn auf Plattform, sonst Boden."""
+    def _platform_top(self):
+        """Oberkante der Plattform (Zug- oder Autodach), auf der der Spieler steht – sonst None."""
         if self.platform and not self.platform._dead:
-            return TRAIN_TOP + self.scale_y * 0.5
+            return self.platform.y + self.platform.hh
+        return None
+
+    def _floor(self) -> float:
+        """Mittelpunkt-Höhe im Stand: auf dem Dach (gleiche Formel wie bei der Landung) oder Boden."""
+        top = self._platform_top()
+        if top is not None:
+            return top + self.scale_y * PLAYER_HH
         return self._base_y
+
+    def _slide_y(self) -> float:
+        """Mittelpunkt-Höhe geduckt. Auf einem Dach bleibt der Spieler oben,
+        statt auf Bodenhöhe in den Zug/das Auto zu rutschen (= Treffer)."""
+        top = self._platform_top()
+        if top is not None:
+            return top + self.scale_y * PLAYER_HH
+        return self._base_y - self._base_sy * 0.27
 
     # ── Update (Physik) ───────────────────────────────────────────────
 
     def update(self):
-        if not GS.running or not self.state.alive:
+        if not GS.running or GS.paused or not self.state.alive:
             return
         dt = time.dt
 
@@ -277,7 +300,8 @@ class Player(Entity):
             self.vel_y += GRAVITY * dt
             self.y     += self.vel_y * dt
             if self.vel_y <= 0 and self.y <= self._base_y:
-                self.y          = self._base_y
+                # Geduckt vom Dach gefallen → geduckt landen, nicht schweben
+                self.y          = self._slide_y() if self.is_sliding else self._base_y
                 self.vel_y      = 0.0
                 self.is_jumping = False
                 self.platform   = None

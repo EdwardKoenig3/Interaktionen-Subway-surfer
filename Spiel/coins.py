@@ -19,7 +19,7 @@ class Coin(Entity):
         self._dead = False
 
     def update(self):
-        if not GS.running or self._dead:
+        if not GS.running or GS.paused or self._dead:
             return
         self.z -= GS.speed * __import__('ursina').time.dt
         if self.z < DESPAWN_Z:

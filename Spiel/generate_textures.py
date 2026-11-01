@@ -1,16 +1,28 @@
 """
 generate_textures.py  –  Pixel-Art Texturen (16×16 Kacheln, Minecraft-Stil)
-Einmal ausführen: python generate_textures.py
+
+    python generate_textures.py           # erzeugt nur fehlende Dateien
+    python generate_textures.py --force   # überschreibt vorhandene Dateien
+
+Hinweis: Das Skript erzeugt NICHT alle Texturen, die das Spiel nutzt.
+Die nummerierten Dateien (01_torso.png … 09_sidewalk.png, Herzen, Logo, Auto)
+liegen nur im Repo. Vorhandene Dateien bleiben ohne --force unverändert.
 """
 import os
+import sys
 from PIL import Image, ImageDraw
 
 OUT = os.path.join(os.path.dirname(__file__), 'textures')
 os.makedirs(OUT, exist_ok=True)
+FORCE = '--force' in sys.argv[1:]
 
 
 def save(img: Image.Image, name: str):
-    img.save(os.path.join(OUT, name))
+    path = os.path.join(OUT, name)
+    if os.path.exists(path) and not FORCE:
+        print(f'  {name}  (vorhanden, übersprungen)')
+        return
+    img.save(path)
     print(f'  {name}')
 
 

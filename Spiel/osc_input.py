@@ -62,6 +62,17 @@ _queues: dict[str, queue.Queue] = {
 # Pause ist global (quellenunabhängig) → eigene Queue
 _pause_q: queue.Queue = queue.Queue()
 
+# Nur Aktionen dieser Quellen werden angenommen. Alles andere (Menü, Pause,
+# Game Over, nicht gewählte Quelle) wird beim Empfang verworfen – sonst laufen
+# die Queues voll und alte Befehle werden später auf einmal ausgeführt.
+_active_sources: frozenset[str] = frozenset()
+
+
+def set_active_sources(sources) -> None:
+    """Legt fest, welche Quellen ('vision', 'voice') gerade Aktionen liefern dürfen."""
+    global _active_sources
+    _active_sources = frozenset(sources)
+
 
 def start_osc_server() -> bool:
     if not _OSC_AVAILABLE:
@@ -76,13 +87,15 @@ def start_osc_server() -> bool:
     def _lane(source, n):
         def _h(addr, *args):
             _log(addr, *args)
-            _queues[source].put(("lane", n))
+            if source in _active_sources:
+                _queues[source].put(("lane", n))
         return _h
 
     def _action(source, name):
         def _h(addr, *args):
             _log(addr, *args)
-            _queues[source].put(("action", name))
+            if source in _active_sources:
+                _queues[source].put(("action", name))
         return _h
 
     def _pause_handler(addr, *args):

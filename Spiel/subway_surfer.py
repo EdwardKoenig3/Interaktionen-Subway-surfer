@@ -28,7 +28,8 @@ Steuerung wird beim Start gewählt:
 
 import random, sys, math
 from ursina import *
-from osc_input import start_osc_server, poll_actions, clear_actions, poll_pause
+from osc_input import (start_osc_server, poll_actions, clear_actions, poll_pause,
+                       set_active_sources, OSC_PORT)
 
 from constants import (
     C_SKY, C_AMBIENT,
@@ -37,7 +38,7 @@ from constants import (
     SPEED_INC, JUMP_VEL, GRAVITY,
     PLAYER_BASE_Y, PLAYER_SY,
     TRAIN_TOP,
-    MAX_LIVES, INVINCIBLE,
+    MAX_LIVES, INVINCIBLE, COIN_SCORE,
 )
 from game_state  import GS, PlayerState
 from player      import Player
@@ -133,9 +134,10 @@ def _spawn_coins():
 
 # ── Kollision (pro Spieler, geteilte Hindernisse + Münzen) ────────────
 
-def _check_collisions(side: Side):
+def _check_collisions(side: Side) -> bool:
+    """Kollisionen eines Spielers prüfen. True, wenn er dabei gestorben ist."""
     if not side.state.alive:
-        return
+        return False
     player = side.player
     state  = side.state
 
@@ -180,8 +182,7 @@ def _check_collisions(side: Side):
             side.hud.update(state)
             if state.lives <= 0:
                 state.alive = False
-                _end_match_on_death(side)
-                return
+                return True
             # nur bei nicht-tödlichem Treffer: Wackeln + Zurückstoßen
             state.shake_t = 0.5
             player.pushback()
@@ -195,24 +196,32 @@ def _check_collisions(side: Side):
             if state.coins % 50 == 0 and state.lives < MAX_LIVES:
                 state.lives += 1
                 side.hud.update(state)
+    return False
 
 
 # ── Game Over / Menü ──────────────────────────────────────────────────
 
-def _end_match_on_death(dead_side: Side):
-    """Sobald ein Spieler stirbt, endet das Match. In 2P gewinnt der andere."""
+def _end_match(dead_sides: list[Side]):
+    """Sobald ein Spieler stirbt, endet das Match. In 2P gewinnt der andere,
+    sterben beide im selben Frame, ist es unentschieden."""
     GS.running = False
+    set_active_sources(())
     if len(sides) == 2:
-        winner = next((s for s in sides if s is not dead_side), None)
-        wname  = 'SPIELER 1' if winner.side == 'left' else 'SPIELER 2'
-        wcol   = P1_COLOR if winner.side == 'left' else P2_COLOR
-        result_text.text  = f'{wname} GEWINNT!'
-        result_text.color = wcol
-        result_sub.text   = f'P1: {sides[0].state.score}   P2: {sides[1].state.score}'
+        if len(dead_sides) >= 2:
+            result_text.text  = 'UNENTSCHIEDEN'
+            result_text.color = color.white
+        else:
+            winner = next(s for s in sides if s is not dead_sides[0])
+            wname  = 'SPIELER 1' if winner.side == 'left' else 'SPIELER 2'
+            wcol   = P1_COLOR if winner.side == 'left' else P2_COLOR
+            result_text.text  = f'{wname} GEWINNT!'
+            result_text.color = wcol
+        result_sub.text = f'P1: {sides[0].state.score}   P2: {sides[1].state.score}'
     else:
+        dead = dead_sides[0]
         result_text.text  = 'GAME OVER'
         result_text.color = color.red
-        result_sub.text   = f'Score: {dead_side.state.score}   Münzen: {dead_side.state.coins}'
+        result_sub.text   = f'Score: {dead.state.score}   Münzen: {dead.state.coins}'
     result_text.enabled  = True
     result_sub.enabled   = True
     restart_hint.text    = 'R  –  zurück zum Menü'
@@ -228,8 +237,14 @@ def _hide_overlays():
         restart_hint.enabled = False
 
 
+def _osc_sources() -> set[str]:
+    return {s.src for s in sides if s.src in ('vision', 'voice')}
+
+
 def _set_paused(p: bool):
     GS.paused = p
+    # In der Pause eintreffende Gesten/Sprachbefehle verwerfen statt puffern
+    set_active_sources(() if p else _osc_sources())
     if pause_text:
         pause_text.text    = 'PAUSE' if p else ''
         pause_text.enabled = p
@@ -288,6 +303,7 @@ def _start_match(cfg: dict):
     for side in sides:
         side.hud.update(side.state)
 
+    set_active_sources(_osc_sources())
     menu.set_visible(False)
     phase = 'playing'
 
@@ -298,6 +314,7 @@ def _to_menu():
     _hide_overlays()
     GS.running = False
     GS.paused  = True
+    set_active_sources(())
     phase = 'menu'
     menu.set_visible(True)
 
@@ -314,10 +331,10 @@ def update():
         return
     dt = time.dt
 
-    # ── geteilter Track ───────────────────────────────────────────────
     if GS.running:
+        # ── geteilter Track ───────────────────────────────────────────
         GS.elapsed += dt
-        GS.speed   += SPEED_INC
+        GS.speed   += SPEED_INC * dt     # pro Sekunde → unabhängig von der Bildrate
         GS.obs_timer += dt
         if GS.obs_timer >= GS.obs_interval():
             _spawn_obstacle()
@@ -327,24 +344,31 @@ def update():
             _spawn_coins()
             GS.coin_timer = 0
 
-    # ── pro Spieler ───────────────────────────────────────────────────
-    for side in sides:
-        st = side.state
-        if st.alive:
-            st.score = int(GS.elapsed * GS.speed * 2)
-            if st.inv_timer > 0: st.inv_timer = max(0.0, st.inv_timer - dt)
-            if st.shake_t  > 0: st.shake_t   = max(0.0, st.shake_t   - dt)
-            if side.src in ('vision', 'voice'):
-                poll_actions(side.player, side.src)
-        _check_collisions(side)
-        side.hud.update(st)
+        # ── pro Spieler ───────────────────────────────────────────────
+        # Erst alle Spieler prüfen, dann das Match beenden – so wird ein
+        # gleichzeitiger Tod beider Spieler als Unentschieden erkannt.
+        died = []
+        for side in sides:
+            st = side.state
+            if st.alive:
+                st.score = int(GS.elapsed * GS.speed * 2) + st.coins * COIN_SCORE
+                if st.inv_timer > 0: st.inv_timer = max(0.0, st.inv_timer - dt)
+                if st.shake_t  > 0: st.shake_t   = max(0.0, st.shake_t   - dt)
+                if side.src in ('vision', 'voice'):
+                    poll_actions(side.player, side.src)
+            if _check_collisions(side):
+                died.append(side)
+            side.hud.update(st)
+        if died:
+            _end_match(died)
 
     # ── Kamera: Mittelwert der (lebenden) Spieler folgen + Shake ──────
     follow = [s for s in sides if s.state.alive] or sides
     avg_x  = sum(s.player.x for s in follow) / len(follow)
     avg_z  = sum(s.player.z for s in follow) / len(follow)
     cam_x  = avg_x * 0.25
-    shake  = max((s.state.shake_t for s in sides), default=0.0)
+    # Nach Match-Ende laufen die Shake-Timer nicht mehr ab → kein Wackeln mehr
+    shake  = max((s.state.shake_t for s in sides), default=0.0) if GS.running else 0.0
     if shake > 0:
         cam_x += random.uniform(-0.45, 0.45) * (shake / 0.5)
     camera.x = lerp(camera.x, cam_x, min(7 * dt, 1))
@@ -439,5 +463,9 @@ GS.paused  = True
 menu = StartMenu()
 phase = 'menu'
 
-start_osc_server()
+if not start_osc_server():
+    # Ohne OSC funktionieren VISION/VOICE nicht – dauerhaft sichtbar warnen
+    Text(f'OSC nicht verfügbar (Port {OSC_PORT}) – nur Tastatur möglich. Details in der Konsole.',
+         parent=camera.ui, origin=(0, 0), position=(0, -0.47),
+         scale=1.0, color=color.red, z=-1, eternal=True)
 app.run()

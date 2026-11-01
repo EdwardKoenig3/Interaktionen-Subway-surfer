@@ -27,4 +27,6 @@ BLOCKSIZE = 600 # Für schnelle Reaktion
 
 WORDS = ["left", "right", "hop", "cover","center"]
 # WORDS = ["links", "rechts", "hoch", "ducken", "mitte"]
-GRAMMAR = json.dumps(WORDS, ensure_ascii=False)
+# "[unk]" fängt alles auf, was kein Befehlswort ist. Ohne es muss Vosk jedes
+# Geräusch auf eines der Befehlswörter abbilden → Fehlauslöser.
+GRAMMAR = json.dumps(WORDS + ["[unk]"], ensure_ascii=False)

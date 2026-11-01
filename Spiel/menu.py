@@ -8,6 +8,7 @@ Tastatur-Navigation:
     ENTER   – Match mit aktueller Auswahl starten
 
 Steuerquellen: TASTATUR, VISION (OSC /game/vision/*), VOICE (OSC /game/voice/*).
+Im 2-Spieler-Modus kann jede OSC-Quelle nur einem Spieler zugeordnet werden.
 """
 
 from ursina import Entity, Text, camera, color, Color, destroy
@@ -63,20 +64,34 @@ class StartMenu:
         """Verarbeitet eine Taste. Gibt 'start' zurück, wenn das Match starten soll."""
         if key == 'tab':
             self.mode = 1 if self.mode == 2 else 2
+            # Beim Wechsel auf 2 Spieler darf rechts nicht dieselbe OSC-Quelle stehen
+            if self.mode == 2 and self._conflict(self.right_src, self.left_src):
+                self.right_src = self._cycle(self.right_src, self.left_src)
             self.refresh()
         elif key == '1':
-            self.left_src = self._cycle(self.left_src)
+            other = self.right_src if self.mode == 2 else None
+            self.left_src = self._cycle(self.left_src, other)
             self.refresh()
         elif key == '2' and self.mode == 2:
-            self.right_src = self._cycle(self.right_src)
+            self.right_src = self._cycle(self.right_src, self.left_src)
             self.refresh()
         elif key == 'enter':
             return 'start'
         return None
 
     @staticmethod
-    def _cycle(src: str) -> str:
-        return SOURCES[(SOURCES.index(src) + 1) % len(SOURCES)]
+    def _conflict(src: str, other: str | None) -> bool:
+        """Zwei Spieler können sich keine OSC-Quelle teilen (die Queue liefert
+        jeden Befehl nur einmal aus). Tastatur ist für beide möglich."""
+        return src == other and src != 'keyboard'
+
+    @classmethod
+    def _cycle(cls, src: str, other: str | None = None) -> str:
+        """Nächste Quelle; überspringt die OSC-Quelle des anderen Spielers."""
+        nxt = SOURCES[(SOURCES.index(src) + 1) % len(SOURCES)]
+        if cls._conflict(nxt, other):
+            nxt = SOURCES[(SOURCES.index(nxt) + 1) % len(SOURCES)]
+        return nxt
 
     def config(self) -> dict:
         if self.mode == 1:

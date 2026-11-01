@@ -94,6 +94,15 @@ class LowLatencyCommandFilter:
 
         return best_command
 
+    def mark_triggered(self):
+
+        # Für Auslösungen außerhalb von process() (finale Ergebnisse):
+        # Cooldown starten und Trefferzähler leeren
+
+        self.last_trigger_time = int(time.time() * 1000)
+
+        self.reset_hits()
+
 
 class PartialCommandDetector:
 
@@ -155,3 +164,27 @@ class PartialCommandDetector:
         predictions = self.text_to_predictions(text)
 
         return self.filter.process(predictions)
+
+    def process_final(self, text):
+
+        # Finales Vosk-Ergebnis: enthält nur Wörter, die noch NICHT über die
+        # Partials ausgelöst wurden (nach jeder Auslösung wird der Recognizer
+        # zurückgesetzt). Deshalb ohne Mindesttreffer – sonst gehen kurze
+        # Wörter verloren. Liefert alle Befehle in gesprochener Reihenfolge.
+
+        commands = []
+
+        for word in text.lower().split():
+
+            for command, keywords in self.command_keywords.items():
+
+                if word in (k.lower() for k in keywords):
+
+                    commands.append(command)
+
+                    break
+
+        if commands:
+            self.filter.mark_triggered()
+
+        return commands

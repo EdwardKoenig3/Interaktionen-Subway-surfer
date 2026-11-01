@@ -169,7 +169,7 @@ class Obstacle(Entity):
     # ── Update & Kollision ───────────────────────────────────────────
 
     def update(self):
-        if not GS.running or self._dead:
+        if not GS.running or GS.paused or self._dead:
             return
         delta = GS.speed * __import__('ursina').time.dt
         self.z -= delta

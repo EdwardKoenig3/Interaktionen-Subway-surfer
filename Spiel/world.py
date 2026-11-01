@@ -26,7 +26,7 @@ class GroundTile(Entity):
             )
 
     def update(self):
-        if not GS.running:
+        if not GS.running or GS.paused:
             return
         self.z -= GS.speed * __import__('ursina').time.dt
         if self.z < DESPAWN_Z:
@@ -45,7 +45,7 @@ class SidewalkTile(Entity):
         )
 
     def update(self):
-        if not GS.running:
+        if not GS.running or GS.paused:
             return
         self.z -= GS.speed * __import__('ursina').time.dt
         if self.z < DESPAWN_Z:

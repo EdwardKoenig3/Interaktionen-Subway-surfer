@@ -36,7 +36,10 @@ TILE_COUNT = 10
 
 # ── Spielgeschwindigkeit ──────────────────────────────────────────────
 INITIAL_SPD = 8.0
-SPEED_INC   = 0.002
+SPEED_INC   = 0.12    # Zuwachs pro Sekunde (früher 0.002 pro Frame bei 60 FPS)
+
+# ── Punkte ────────────────────────────────────────────────────────────
+COIN_SCORE  = 10      # Punkte pro Münze (Score = Distanz + Münzen × COIN_SCORE)
 
 # ── Spieler ───────────────────────────────────────────────────────────
 # Sprung: kalibriert so dass Spieler Autos (Dach 1.3) locker überspringt,

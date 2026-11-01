@@ -26,6 +26,16 @@ def audio_callback(indata, frames, time_info, status):
     audio_queue.put(bytes(indata))
 
 
+def send_command(client, command):
+    # Befehl auf OSC-Adressen abbilden und senden. True, wenn etwas gesendet wurde.
+    commands = map_command(command)
+
+    for address, value in commands:
+        client.send_message(address, value)
+
+    return bool(commands)
+
+
 def main():
 
     parser = argparse.ArgumentParser(description="Sprachsteuerung für Subway Surfer")
@@ -58,16 +68,16 @@ def main():
     # Recognizer starten
     recognizer = speech_engine.init_recognizer(model)
 
-    # Sprachbefehle
+    # Sprachbefehle – nur Wörter aus config.WORDS, andere erkennt die Grammatik nicht
     command_detector = PartialCommandDetector(
 
         command_keywords={
 
             "left": ["left"],
             "right": ["right"],
-            "jump": ["jump", "hop", "up", "bounce" ],
-            "duck": ["duck", "down","cover"],
-            "middle": ["middle", "mid","center"]
+            "jump": ["hop"],
+            "duck": ["cover"],
+            "middle": ["center"]
 
         },
 
@@ -99,9 +109,16 @@ def main():
 
                 data = audio_queue.get()
 
-                # Finale Sprache
+                # Finale Sprache: Wörter, die über die Partials nicht genug
+                # Treffer bekommen haben, hier noch auslösen statt verwerfen
                 if recognizer.AcceptWaveform(data):
-                    recognizer.Result()
+                    final_text = json.loads(
+                        recognizer.Result()
+                    ).get("text", "").strip().lower()
+
+                    for command in command_detector.process_final(final_text):
+                        if send_command(client, command):
+                            print(f"OSC GESENDET (final): {command}")
 
                 else:
 
@@ -134,18 +151,7 @@ def main():
                                 f"[COMMAND] {detected_command}"
                             )
 
-                            commands = map_command(
-                                detected_command
-                            )
-
-                            if commands:
-
-                                for address, value in commands:
-
-                                    client.send_message(
-                                        address,
-                                        value
-                                    )
+                            if send_command(client, detected_command):
 
                                 send_time = time.perf_counter()
 

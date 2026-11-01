@@ -1,5 +1,6 @@
 import cv2
 import json
+import time
 from pathlib import Path
 from pythonosc.udp_client import SimpleUDPClient
 from typing import Any, Dict, List, Optional, Tuple
@@ -49,34 +50,31 @@ def get_default_reference() -> Dict[str, float]:
     return DEFAULT_REFERENCE.copy()
 
 
-def load_player_reference(player_id: int, filename: str = _REFERENCE_FILE) -> Dict[str, float]:
+def load_reference(filename: str = _REFERENCE_FILE) -> Dict[str, float]:
+    """Gemeinsame Referenz für jeden Spieler laden (fehlende Werte → Defaults).
+
+    Früher wurde pro YOLO-Index gespeichert – der Index ist aber nur die
+    Reihenfolge der Erkennung im Frame, keine feste Person.
+    """
+    reference = get_default_reference()
     path = Path(filename)
     if not path.exists():
-        return get_default_reference()
-
+        return reference
     try:
         with path.open("r", encoding="utf-8") as reference_file:
             data = json.load(reference_file)
     except (json.JSONDecodeError, OSError):
-        return get_default_reference()
+        return reference
+    if isinstance(data, dict):
+        reference.update(data)
+    return reference
 
-    return data.get(str(player_id), get_default_reference())
 
-
-def save_player_reference(player_id: int, reference: Dict[str, float], filename: str = _REFERENCE_FILE) -> None:
-    path = Path(filename)
+def save_reference(reference: Dict[str, float], filename: str = _REFERENCE_FILE) -> None:
     try:
-        if path.exists():
-            with path.open("r", encoding="utf-8") as reference_file:
-                data = json.load(reference_file)
-        else:
-            data = {}
-        
-        data[str(player_id)] = reference
-        
-        with path.open("w", encoding="utf-8") as reference_file:
-            json.dump(data, reference_file, indent=2, ensure_ascii=False)
-    except (json.JSONDecodeError, OSError) as e:
+        with Path(filename).open("w", encoding="utf-8") as reference_file:
+            json.dump(reference, reference_file, indent=2, ensure_ascii=False)
+    except OSError as e:
         print(f"Fehler beim Speichern der Referenz: {e}")
 
 
@@ -136,18 +134,61 @@ def select_person_by_key(key: int, persons: List[TrackedPerson]) -> Optional[Tra
     return None
 
 
-def find_best_person(persons: List[TrackedPerson], selected_position: Tuple[float, float]) -> Optional[Tuple[Any, float, float]]:
+def find_best_person(persons: List[TrackedPerson], selected_position: Tuple[float, float],
+                     max_dist: float) -> Optional[Tuple[Any, float, float]]:
+    """Person, deren Hüfte der letzten Spielerposition am nächsten ist.
+
+    Liegt sie weiter als `max_dist` Pixel weg, wird None geliefert – sonst
+    würde bei einem kurzen Erkennungsaussetzer eine andere Person (z.B. der
+    Voice-Spieler) die Steuerung übernehmen.
+    """
     best_person = None
-    min_dist = float("inf")
+    min_dist_sq = max_dist ** 2
     for _, person_kpts, huefte_x, huefte_y in persons:
-        dist = (huefte_x - selected_position[0]) ** 2 + (huefte_y - selected_position[1]) ** 2
-        if dist < min_dist:
-            min_dist = dist
+        dist_sq = (huefte_x - selected_position[0]) ** 2 + (huefte_y - selected_position[1]) ** 2
+        if dist_sq <= min_dist_sq:
+            min_dist_sq = dist_sq
             best_person = (person_kpts, huefte_x, huefte_y)
     return best_person
 
 
-def analyze_person(person_kpts: Any, h: int, w: int, client: SimpleUDPClient, position: str, reference: Optional[Dict[str, float]] = None, last_zustand: str = "STEHT") -> Tuple[str, str]:
+_LANE_ADDR = {
+    "LINKS":  "/game/vision/left",
+    "MITTE":  "/game/vision/center",
+    "RECHTS": "/game/vision/right",
+}
+
+
+class LaneSender:
+    """Sendet die Spur bei Änderung sofort, sonst alle `repeat_s` Sekunden erneut.
+
+    Die Wiederholung ist nötig: Das Spiel lehnt einen Spurwechsel ab, solange
+    ein Zug im Weg ist. Durch das erneute Senden klappt er, sobald frei ist –
+    ohne wie früher in jedem Frame zu senden und zu printen.
+    """
+
+    def __init__(self, client: SimpleUDPClient, repeat_s: float = 0.25):
+        self.client = client
+        self.repeat_s = repeat_s
+        self._last: Optional[str] = None
+        self._last_t = 0.0
+
+    def send(self, target: str) -> None:
+        now = time.monotonic()
+        changed = target != self._last
+        if changed or now - self._last_t >= self.repeat_s:
+            addr = _LANE_ADDR[target]
+            self.client.send_message(addr, [])
+            if changed:
+                print(addr)
+            self._last = target
+            self._last_t = now
+
+    def reset(self) -> None:
+        self._last = None
+
+
+def analyze_person(person_kpts: Any, h: int, w: int, client: SimpleUDPClient, lane_sender: LaneSender, reference: Optional[Dict[str, float]] = None, last_zustand: str = "STEHT") -> Tuple[str, str]:
     reference = reference or get_default_reference()
     left_ratio = reference.get("left_ratio", 1/3)
     right_ratio = reference.get("right_ratio", 2/3)
@@ -172,18 +213,13 @@ def analyze_person(person_kpts: Any, h: int, w: int, client: SimpleUDPClient, po
 
     # Neue Logik zur Positionserkennung basierend auf Nase
     if nase[0] < w * left_ratio:
-        client.send_message("/game/vision/left", [])
-        print("/game/vision/left")
         target = "LINKS"
     elif nase[0] < w * right_ratio:
-        client.send_message("/game/vision/center", [])
-        print("/game/vision/center")
         target = "MITTE"
     else:
-        client.send_message("/game/vision/right", [])
-        print("/game/vision/right")
         target = "RECHTS"
-    
+    lane_sender.send(target)
+
     zustand = "STEHT"
 
     # Nasenhöhe-basierte Zustandserkennung
@@ -276,64 +312,37 @@ def draw_no_person(annotated: Any, h: int) -> None:
     )
 
 
-def left_arm_raised(person_kpts: Any, body_height: Optional[float] = None, pixel_thresh: int = 30) -> bool:
-    """Erkennt ob beide Arme oberhalb der Schultern sind.
+def draw_countdown(annotated: Any, remaining: float, h: int, w: int) -> None:
+    """Countdown vor der Kalibrierung groß in die Bildmitte zeichnen."""
+    cv2.putText(annotated, "Gerade hinstellen!", (w // 2 - 220, h // 2 - 90),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.4, (0, 255, 255), 3)
+    cv2.putText(annotated, str(int(remaining) + 1), (w // 2 - 40, h // 2 + 60),
+                cv2.FONT_HERSHEY_SIMPLEX, 5.0, (0, 255, 255), 10)
 
-    Uses keypoint indices: 5=left_shoulder, 6=right_shoulder, 9=left_wrist, 10=right_wrist.
-    Wenn `body_height` gegeben, wird eine relative Schwelle genutzt (10% der Körperhöhe),
+
+# YOLO-Keypoint-Indizes: 5/6 = linke/rechte Schulter, 9/10 = linkes/rechtes Handgelenk.
+# "links"/"rechts" ist die YOLO-Bezeichnung im (gespiegelten) Kamerabild.
+_WRIST_SHOULDER = {"left": (9, 5), "right": (10, 6)}
+
+
+def wrist_raised(person_kpts: Any, side: str, body_height: Optional[float] = None, pixel_thresh: int = 30) -> bool:
+    """True, wenn das Handgelenk `side` ("left"/"right") deutlich über der Schulter ist.
+
+    Mit `body_height` gilt eine relative Schwelle (10 % der Körperhöhe),
     sonst `pixel_thresh` als Fallback.
     """
-    # Indices: 5 left shoulder, 6 right shoulder, 9 left wrist, 10 right wrist
+    wrist_idx, shoulder_idx = _WRIST_SHOULDER[side]
     try:
-        li_sh = person_kpts[5]
-        re_sh = person_kpts[6]
-        li_wr = person_kpts[9]
-        re_wr = person_kpts[10]
+        wrist = person_kpts[wrist_idx]
+        shoulder = person_kpts[shoulder_idx]
     except Exception:
         return False
 
-    # Sicherstellen, dass Keypoints vorhanden sind
-    if li_sh[1] <= 0 or re_sh[1] <= 0 or li_wr[1] <= 0 or re_wr[1] <= 0:
+    # Keypoint nicht erkannt → y ist 0
+    if wrist[1] <= 0 or shoulder[1] <= 0:
         return False
 
-    if body_height and body_height > 0:
-        thresh = body_height * 0.10
-    else:
-        thresh = pixel_thresh
+    thresh = body_height * 0.10 if body_height and body_height > 0 else pixel_thresh
 
-    # y-Werte in den Keypoints sind Pixelpositionen (größer = weiter unten).
-    # Arm gehoben = Hand (wrist) deutlich oberhalb Schulter (smaller y).
-    right_raised = float(re_wr[1]) < float(re_sh[1]) - thresh
-
-    return right_raised
-
-def right_arm_raised(person_kpts: Any, body_height: Optional[float] = None, pixel_thresh: int = 30) -> bool:
-    """Erkennt ob beide Arme oberhalb der Schultern sind.
-
-    Uses keypoint indices: 5=left_shoulder, 6=right_shoulder, 9=left_wrist, 10=right_wrist.
-    Wenn `body_height` gegeben, wird eine relative Schwelle genutzt (10% der Körperhöhe),
-    sonst `pixel_thresh` als Fallback.
-    """
-    # Indices: 5 left shoulder, 6 right shoulder, 9 left wrist, 10 right wrist
-    try:
-        li_sh = person_kpts[5]
-        re_sh = person_kpts[6]
-        li_wr = person_kpts[9]
-        re_wr = person_kpts[10]
-    except Exception:
-        return False
-
-    # Sicherstellen, dass Keypoints vorhanden sind
-    if li_sh[1] <= 0 or re_sh[1] <= 0 or li_wr[1] <= 0 or re_wr[1] <= 0:
-        return False
-
-    if body_height and body_height > 0:
-        thresh = body_height * 0.10
-    else:
-        thresh = pixel_thresh
-
-    # y-Werte in den Keypoints sind Pixelpositionen (größer = weiter unten).
-    # Arm gehoben = Hand (wrist) deutlich oberhalb Schulter (smaller y).
-    left_raised = float(li_wr[1]) < float(li_sh[1]) - thresh
-
-    return left_raised
+    # Pixel-y wächst nach unten → gehoben = kleineres y
+    return float(wrist[1]) < float(shoulder[1]) - thresh
