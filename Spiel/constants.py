@@ -29,21 +29,37 @@ LANES      = [-2.5, 0.0, 2.5]
 LANE_COUNT = 3
 
 # ── Welt ─────────────────────────────────────────────────────────────
-SPAWN_Z    = 50
-DESPAWN_Z  = -14
+SPAWN_Z    = 150   # Vorderkante neuer Hindernisse/Münzen (vorher 50 → zu spät sichtbar)
+SPAWN_GAP  = 4.0   # Mindestabstand zum vorigen Hindernis in derselben Spur beim Spawnen
+
+# ── Hindernis-Spawn ──────────────────────────────────────────────────
+# Physischer Abstand (Einheiten) zwischen zwei Spawns – bleibt bei jedem Tempo gleich,
+# nur der zeitliche Abstand wird kleiner (bei Tempo 24: 1,7 s, bei 168: 0,24 s).
+# In derselben Spur liegt durch den Spur-Beutel im Schnitt ca. das 3-Fache dazwischen.
+OBS_SPACING         = 40.0
+DOUBLE_SPAWN_CHANCE = 1 / 5  # Wahrscheinlichkeit für zwei Hindernisse nebeneinander
+# Züge sind Wände. In einem Bereich von ± (Tempo × diese Zeit) um einen neuen Zug
+# dürfen höchstens 2 Spuren Züge haben – so bleibt immer eine Spur passierbar
+# und man hat Zeit, rechtzeitig dorthin zu wechseln.
+TRAIN_WALL_MARGIN_S = 0.5
+# Hinter der Kamera entfernen/recyceln. Die Kamera geht beim Zurückstoßen bis
+# z ≈ -27 zurück und sieht den Boden ab z ≈ -12 – alles davor muss noch da sein.
+DESPAWN_Z  = -30
 TILE_LEN   = 12
-TILE_COUNT = 10
+TILE_COUNT = 30    # 30 × 12 = 360 Einheiten Straße/Häuser (bis z ≈ 330)
 
 # ── Spielgeschwindigkeit ──────────────────────────────────────────────
-INITIAL_SPD = 8.0
-SPEED_INC   = 0.12    # Zuwachs pro Sekunde (früher 0.002 pro Frame bei 60 FPS)
+INITIAL_SPD = 24.0
+SPEED_INC   = 0.4     # Zuwachs pro Sekunde
+MAX_SPD_AFTER = 360.0 # so lange wird beschleunigt (6 min)
+MAX_SPD     = INITIAL_SPD + SPEED_INC * MAX_SPD_AFTER   # Obergrenze (= 168)
 
 # ── Punkte ────────────────────────────────────────────────────────────
-COIN_SCORE  = 10      # Punkte pro Münze (Score = Distanz + Münzen × COIN_SCORE)
+COIN_SCORE  = 100     # Punkte pro Münze (Score = Distanz + Münzen × COIN_SCORE)
 
 # ── Spieler ───────────────────────────────────────────────────────────
 # Sprung: kalibriert so dass Spieler Autos (Dach 1.3) locker überspringt,
-# Züge (top=2.2) aber NICHT erreicht (nur über die Rampe).
+# Züge (top=2.2) aber NICHT überspringt (Züge = Wand, nur Spurwechsel).
 # max_height = JUMP_VEL² / (2*|GRAVITY|) = 67.24/36 = 1.868
 # Spieler-Boden max = 0.75 + 1.868 - 0.48 = 2.14 < Zug-Top 2.2  ✓
 JUMP_VEL      = 8.2
@@ -67,13 +83,15 @@ TRAIN_SX   = 2.2
 TRAIN_SY   = 2.2
 TRAIN_Y    = 1.1
 TRAIN_TOP  = TRAIN_Y + TRAIN_SY * 0.5   # = 2.2  (Oberkante)
-RAMP_LEN   = 2.5   # Länge der Rampe vor dem Zug
 
 # Overhead-Hindernis: nur durch Sliden passierbar
-# Boden = OVERHEAD_Y - OVERHEAD_SY/2 = 2.8 - 2.0 = 0.8
+# Unterkante = OVERHEAD_Y - OVERHEAD_SY/2 = 2.0 - 1.2 = 0.8
+# Oberkante  = 2.0 + 1.2 = 3.2 (vorher 4.8 → versperrte zu viel Sicht)
 # Slide-Top ≈ 0.70 < 0.8 → passiert ✓  |  Stand-Top ≈ 1.25 > 0.8 → kollidiert ✓
-OVERHEAD_Y  = 2.8
-OVERHEAD_SY = 4.0
+# Sprung: Spieler-Mitte max. 2.62, Kopf max. 3.10 < 3.2 → nicht überspringbar ✓
+#   (Kollision: |2.0 - y| < 1.15 + 0.48 - 0.1 = 1.53 gilt für alle y in 0.75 … 2.62)
+OVERHEAD_Y  = 2.0
+OVERHEAD_SY = 2.4
 
 # ── Leben & Kollision ─────────────────────────────────────────────────
 MAX_LIVES    = 3

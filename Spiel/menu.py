@@ -12,6 +12,7 @@ Im 2-Spieler-Modus kann jede OSC-Quelle nur einem Spieler zugeordnet werden.
 """
 
 from ursina import Entity, Text, camera, color, Color, destroy
+from leaderboard import LeaderboardView
 
 SOURCES = ['keyboard', 'vision', 'voice']
 SRC_LABEL = {'keyboard': 'TASTATUR', 'vision': 'VISION', 'voice': 'VOICE'}
@@ -20,9 +21,9 @@ SRC_LABEL = {'keyboard': 'TASTATUR', 'vision': 'VISION', 'voice': 'VOICE'}
 class StartMenu:
     def __init__(self):
         # Konfiguration mit sinnvollen Defaults
-        self.mode      = 2            # 1 oder 2 Spieler
+        self.mode      = 1            # 1 oder 2 Spieler
         self.left_src  = 'vision'     # linker Spieler / Einzelspieler
-        self.right_src = 'voice'      # rechter Spieler
+        self.right_src = 'voice'      # rechter Spieler (wird bei 2 Spielern genutzt)
 
         self.bg = Entity(parent=camera.ui, model='quad', color=Color(0, 0, 0, 0.7),
                          scale=(2, 2), z=1, eternal=True)
@@ -36,11 +37,14 @@ class StartMenu:
                                scale=1.2, color=color.white, z=0)
         self.right_line = Text('', parent=camera.ui, origin=(0, 0), position=(0, -0.14),
                                scale=1.2, color=color.white, z=0)
-        self.hint = Text('TAB: Modus    1/2: Quelle    ENTER: Start',
+        self.hint = Text('TAB: Modus    1/2: Quelle    ENTER oder beide Arme hoch: Start',
                          parent=camera.ui, origin=(0, 0), position=(0, -0.30),
                          scale=0.9, color=Color(0.8, 0.8, 0.8, 1), z=0)
         self._elems = [self.bg, self.logo, self.title, self.mode_line,
                        self.left_line, self.right_line, self.hint]
+        # Bestenliste rechts neben dem Menü (nur 1 Spieler, für die gewählte Quelle)
+        self.board = LeaderboardView(x_center=0.58, y_top=0.30, width=0.40, scale=0.9)
+        self._visible = True
         self.refresh()
 
     # ── Anzeige ──────────────────────────────────────────────────────
@@ -52,12 +56,17 @@ class StartMenu:
         else:
             self.left_line.text  = f'Links:  {SRC_LABEL[self.left_src]}'
             self.right_line.text = f'Rechts: {SRC_LABEL[self.right_src]}'
+        # 2-Spieler-Runden zählen nicht für die Bestenliste → dort keine Liste
+        if self._visible and self.mode == 1:
+            self.board.show(self.left_src)
+        else:
+            self.board.hide()
 
     def set_visible(self, visible: bool):
+        self._visible = visible
         for e in self._elems:
             e.enabled = visible
-        if visible:
-            self.refresh()
+        self.refresh()
 
     # ── Eingabe ──────────────────────────────────────────────────────
     def handle_key(self, key) -> str | None:

@@ -17,9 +17,13 @@ class Coin(Entity):
             position=(LANES[lane], y, z),
         )
         self._dead = False
+        self.prev_z = z   # z im letzten Frame (für die Sweep-Prüfung in collect)
 
     def update(self):
-        if not GS.running or GS.paused or self._dead:
+        if self._dead:
+            return
+        self.prev_z = self.z
+        if not GS.running or GS.paused:
             return
         self.z -= GS.speed * __import__('ursina').time.dt
         if self.z < DESPAWN_Z:
@@ -27,10 +31,17 @@ class Coin(Entity):
             __import__('ursina').destroy(self)
 
     def collect(self, player) -> bool:
-        """True wenn Spieler nah genug ist UND auf gleicher Höhe."""
+        """True wenn Spieler nah genug ist UND auf gleicher Höhe.
+
+        In z wird die ganze seit dem letzten Frame zurückgelegte Strecke geprüft –
+        bei hohem Tempo würde die Münze sonst zwischen zwei Frames durchrutschen.
+        """
+        if self._dead:
+            return False
+        lo = min(self.z, self.prev_z) - 0.60
+        hi = max(self.z, self.prev_z) + 0.60
         return (
-            not self._dead
+            lo < player.z < hi
             and abs(self.x - player.x) < 0.60
-            and abs(self.z - player.z) < 0.60
             and abs(self.y - player.y) < 0.85
         )

@@ -6,7 +6,9 @@ _HEART_EMPTY = 'textures/05_heart_empty.png'
 
 
 class PlayerHud:
-    """HUD einer Spieler-Seite (Score, Münzen, Herzen, Game-Over).
+    """HUD einer Spieler-Seite (Score, Herzen, Game-Over).
+
+    Münzen werden nicht separat angezeigt – sie fließen nur in den Score ein.
 
     `x_center` verschiebt das HUD in die jeweilige Bildschirmhälfte
     (0.0 = Vollbild/1P, negativ = linke Hälfte, positiv = rechte Hälfte).
@@ -24,8 +26,6 @@ class PlayerHud:
                          scale=1.0 * tscale, color=accent) if label else None
         self.score = Text('0', position=(x_center, 0.46), origin=(0, 0),
                           scale=2.2 * tscale, color=accent)
-        self.coins = Text('$ 0', position=(x_center - 0.40 * s, 0.46), origin=(-0.5, 0),
-                          scale=1.6 * tscale, color=C_COIN)
         self.over  = Text('', position=(x_center, 0.12), origin=(0, 0), scale=3 * tscale, color=color.red)
         self.sub   = Text('', position=(x_center, 0.00), origin=(0, 0), scale=1.5 * tscale, color=color.white)
         self.restart = Text('', position=(x_center, -0.12), origin=(0, 0), scale=1.4 * tscale, color=C_COIN)
@@ -40,9 +40,8 @@ class PlayerHud:
             self.hearts.append([part])
 
     def update(self, state):
-        """Score/Münzen/Herzen aus dem PlayerState übernehmen."""
+        """Score/Herzen aus dem PlayerState übernehmen."""
         self.score.text = str(state.score)
-        self.coins.text = f'$ {state.coins}'
         for i, parts in enumerate(self.hearts):
             tex = _HEART_FULL if i < state.lives else _HEART_EMPTY
             for part in parts:
@@ -60,7 +59,7 @@ class PlayerHud:
 
     def destroy(self):
         from ursina import destroy
-        elems = [self.score, self.coins, self.over, self.sub, self.restart]
+        elems = [self.score, self.over, self.sub, self.restart]
         if self.name:
             elems.append(self.name)
         for e in elems:

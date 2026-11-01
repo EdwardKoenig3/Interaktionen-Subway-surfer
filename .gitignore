@@ -1,2 +1,6 @@
 __pycache__/
 .claude/
+
+# Bestenliste ist pro Rechner (siehe Spiel/leaderboard.py)
+Spiel/highscores*.json
+Spiel/highscores.tmp

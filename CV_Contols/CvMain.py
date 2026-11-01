@@ -14,6 +14,7 @@ _YOLO_MODEL = _PROJECT_DIR / "yolo26n-pose.pt"
 
 CALIB_DELAY_S = 3.0              # Countdown nach der Auswahl, dann Nasenhöhe messen
 RESET_HOLD_S = 1.0               # so lange muss der Reset-Arm oben bleiben
+START_HOLD_S = 1.0               # so lange müssen beide Arme für die Start-Geste oben bleiben
 TRACK_MAX_DIST_FRACTION = 0.5    # max. Hüft-Sprung pro Frame (Anteil der Körperhöhe)
 TRACK_MAX_DIST_FALLBACK = 150    # dasselbe in Pixeln, solange keine Körperhöhe bekannt
 
@@ -98,7 +99,8 @@ def main() -> None:
 
     print("Tracking läuft. Mit 'q' beenden. 'r' = Auswahlmodus. "
           "Auswahl: linken Arm heben (YOLO-links) oder Taste 0-9. "
-          f"Reset: rechten Arm {RESET_HOLD_S:.0f} s oben halten.")
+          f"Reset: rechten Arm {RESET_HOLD_S:.0f} s oben halten. "
+          f"Spiel starten / zurück ins Menü: beide Arme {START_HOLD_S:.0f} s oben halten.")
 
     cv2.namedWindow("Pose Tracking", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("Pose Tracking", 1920, 1080)
@@ -112,10 +114,15 @@ def main() -> None:
     selected_reference = None
     calib_deadline = 0.0
     reset_arm_since = None
+    start_arms_since = None
+    start_sent = False
 
     def select(idx: int, huefte_x: float, huefte_y: float, how: str) -> None:
         nonlocal selected_person, selected_position, selected_reference
         nonlocal calib_deadline, reset_arm_since, position, zustand, last_zustand
+        nonlocal start_arms_since, start_sent
+        start_arms_since = None
+        start_sent = False
         selected_person = idx
         selected_position = (huefte_x, huefte_y)
         selected_reference = tracker.load_reference()
@@ -180,6 +187,7 @@ def main() -> None:
         if best_person is None:
             tracker.draw_no_person(annotated, h)
             reset_arm_since = None
+            start_arms_since = None
         else:
             person_kpts, huefte_x, huefte_y = best_person
             selected_position = (huefte_x, huefte_y)
@@ -203,9 +211,28 @@ def main() -> None:
                 last_zustand = zustand
             tracker.draw_player_status(annotated, huefte_x, huefte_y, position, zustand)
 
-            # Reset nur durch den Spieler selbst und nur, wenn der rechte Arm
-            # RESET_HOLD_S oben bleibt – kurzes Armhochreißen beim Sprung zählt nicht.
-            if tracker.wrist_raised(person_kpts, "right", selected_reference.get("body_height")):
+            ref_h = selected_reference.get("body_height")
+            left_up = tracker.wrist_raised(person_kpts, "left", ref_h)
+            right_up = tracker.wrist_raised(person_kpts, "right", ref_h)
+            calibrated = selected_reference.get("nose_y") is not None
+
+            # Start: beide Arme START_HOLD_S oben (erst nach der Kalibrierung).
+            # Danach müssen die Arme erst wieder runter, bevor erneut gesendet wird.
+            if calibrated and left_up and right_up:
+                if start_arms_since is None:
+                    start_arms_since = now
+                elif not start_sent and now - start_arms_since >= START_HOLD_S:
+                    client.send_message("/game/vision/start", [])
+                    print("/game/vision/start")
+                    start_sent = True
+            else:
+                start_arms_since = None
+                start_sent = False
+
+            # Reset nur durch den Spieler selbst und nur, wenn NUR der rechte Arm
+            # RESET_HOLD_S oben bleibt – kurzes Armhochreißen beim Sprung und die
+            # Start-Geste (beide Arme) zählen nicht.
+            if right_up and not left_up:
                 if reset_arm_since is None:
                     reset_arm_since = now
                 elif now - reset_arm_since >= RESET_HOLD_S:

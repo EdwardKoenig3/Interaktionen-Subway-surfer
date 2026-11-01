@@ -53,14 +53,15 @@ class SidewalkTile(Entity):
 
 
 def make_buildings():
-    """Erstellt statische Hintergrundgebäude auf beiden Seiten."""
+    """Erstellt statische Hintergrundgebäude auf beiden Seiten –
+    über die ganze Länge der Straße (DESPAWN_Z … DESPAWN_Z + TILE_COUNT × TILE_LEN)."""
     for side in [-1, 1]:
-        for i in range(8):
+        for i in range(TILE_COUNT):
             h = 4 + (i * 47 + 11) % 9
             Entity(
                 model='cube', texture='textures/building.png',
                 texture_scale=(1, h / 4),
                 scale=(2.2, h, TILE_LEN - 0.3),
-                position=(side * 7.5, h / 2 - 0.15, i * TILE_LEN - 10),
+                position=(side * 7.5, h / 2 - 0.15, DESPAWN_Z + (i + 0.5) * TILE_LEN),
                 eternal=True,
             )

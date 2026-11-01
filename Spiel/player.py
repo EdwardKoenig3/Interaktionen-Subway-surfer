@@ -1,10 +1,8 @@
-import math
 from ursina import Entity, lerp, time
 from constants import (
     LANES, LANE_COUNT,
     JUMP_VEL, GRAVITY, SLIDE_DUR, LANE_SPD,
     PLAYER_BASE_Y, PLAYER_SY, PLAYER_HW, PLAYER_HH,
-    TRAIN_TOP, RAMP_LEN,
     PUSHBACK_DUR, PUSHBACK_DIST,
 )
 from game_state import GS
@@ -40,7 +38,6 @@ class Player(Entity):
         self.is_sliding    = False
         self.slide_held    = False
         self.slide_timer   = 0.0
-        self._ramp_jump    = False
         self._base_sy      = PLAYER_SY
         self._base_y       = PLAYER_BASE_Y
         self.platform      = None
@@ -211,7 +208,8 @@ class Player(Entity):
 
     def _platform_top(self):
         """Oberkante der Plattform (Zug- oder Autodach), auf der der Spieler steht – sonst None."""
-        if self.platform and not self.platform._dead:
+        # `is not None` statt Wahrheitswert: ein zerstörtes Ursina-Entity ist "falsy"
+        if self.platform is not None and not self.platform._dead:
             return self.platform.y + self.platform.hh
         return None
 
@@ -254,41 +252,19 @@ class Player(Entity):
         # ── Seitliche Bewegung ────────────────────────────────────────
         self.x = lerp(self.x, self.target_x, min(LANE_SPD * dt, 1))
 
-        # ── Rampen-Boost ──────────────────────────────────────────────
-        # Wenn die Vorderkante eines Rampen-Zugs nahe ist, Spieler nach oben boosten.
-        # Funktioniert in jedem Zustand (Laufen, Springen, Sliden):
-        # die Treppe ist immer der Weg nach oben – kein Schaden, kein Phasen.
-        if self.platform is None and not self._ramp_jump:
-            for o in self.obstacles_ref:
-                if o._dead or not o.has_ramp:
-                    continue
-                train_front = o.z - o.hz
-                if 0.3 <= train_front <= RAMP_LEN + 0.8:
-                    if abs(o.x - self.x) < o.hw + 0.35:
-                        # Slide automatisch abbrechen, sonst startet der Sprung
-                        # aus geduckter Pose und erreicht das Zugdach nicht.
-                        if self.is_sliding:
-                            self.is_sliding  = False
-                            self.slide_held  = False
-                            self.slide_timer = 0.0
-                            self.scale_y     = self._base_sy
-                            self.y           = self._base_y
-                        target_top = TRAIN_TOP + self.scale_y * 0.5
-                        v = math.sqrt(2 * abs(GRAVITY) * max(target_top - self.y, 0.1))
-                        self.vel_y      = max(self.vel_y, v)
-                        self.is_jumping = True
-                        self._ramp_jump = True
-                        break
-
         # ── Plattform-Exit: hinten runtergefahren oder Spur verlassen ─
         # WICHTIG: Hinterkante (z + hz) prüfen, nicht die Vorderkante –
         # sonst fällt der Spieler direkt nach dem Aufsteigen wieder runter
         # und kann nie vom Dach abspringen.
-        if self.platform:
+        # WICHTIG: `is not None` statt `if self.platform:` – ein zerstörtes
+        # Ursina-Entity (leerer NodePath) ist "falsy". Sonst wurde dieser Block
+        # übersprungen und der Spieler schwebte nach dem Despawn in der Luft.
+        # _dead zuerst prüfen: Position eines zerstörten Entities nicht mehr lesen.
+        if self.platform is not None:
             p = self.platform
-            off_back = (p.z + p.hz) < self.z          # ganzer Bus hinten vorbei
-            off_side = abs(p.x - self.x) > p.hw + PLAYER_HW  # Spur gewechselt, kein Dach drunter
-            if p._dead or off_back or off_side:
+            if (p._dead
+                    or (p.z + p.hz) < self.z                   # ganzer Zug hinten vorbei
+                    or abs(p.x - self.x) > p.hw + PLAYER_HW):  # Spur gewechselt, kein Dach drunter
                 self.platform = None
                 if not self.is_jumping:
                     self.vel_y      = 0.0
@@ -305,7 +281,6 @@ class Player(Entity):
                 self.vel_y      = 0.0
                 self.is_jumping = False
                 self.platform   = None
-                self._ramp_jump = False
 
         # ── Slide-Timer ───────────────────────────────────────────────
         # Wenn Taste gehalten (slide_held), läuft der Timer nicht ab.
@@ -317,14 +292,3 @@ class Player(Entity):
                 self.slide_held  = False
                 self.scale_y     = self._base_sy
                 self.y           = self._floor()
-
-        # ── Rampen-Neigung (rotation_x) ───────────────────────────────
-        # Beim Hochlaufen auf der Rampe neigt sich der Körper vorwärts,
-        # beim Fallen wieder zurück auf 0.
-        if self._ramp_jump and self.is_jumping:
-            target_rx = 28 if self.vel_y > 1.0 else 0
-            self.rotation_x = lerp(self.rotation_x, target_rx, min(10 * dt, 1))
-        elif self.rotation_x != 0:
-            self.rotation_x = lerp(self.rotation_x, 0, min(12 * dt, 1))
-            if abs(self.rotation_x) < 0.3:
-                self.rotation_x = 0

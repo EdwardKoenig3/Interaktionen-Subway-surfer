@@ -4,7 +4,7 @@ from constants import INITIAL_SPD, MAX_LIVES
 class GS:
     """Geteilter Track-Zustand (beide Spieler teilen sich denselben Hindernis-Track).
 
-    Enthält nur globale Werte: Geschwindigkeit, Zeit, Spawn-Timer und das
+    Enthält nur globale Werte: Geschwindigkeit, Zeit, Spawn-Zähler und das
     Match-Flag `running`. Spielerabhängige Werte (Punkte, Leben, Münzen,
     Game-Over) liegen pro Spieler in `PlayerState`.
 
@@ -16,16 +16,8 @@ class GS:
     elapsed    = 0.0
     running    = True
     paused     = True    # startet pausiert bis Match gestartet wird
-    obs_timer  = 0.0
+    obs_dist   = 0.0     # zurückgelegte Strecke seit dem letzten Hindernis-Spawn
     coin_timer = 0.0
-
-    @classmethod
-    def obs_interval(cls) -> float:
-        """
-        Abstände zwischen Hindernissen – großzügig für Gestensteuerung.
-        Bei Startgeschwindigkeit ~2.5 s, Minimum 1.8 s.
-        """
-        return max(1.8, 2.8 - cls.speed * 0.03)
 
     @classmethod
     def reset(cls):
@@ -33,7 +25,7 @@ class GS:
         cls.elapsed    = 0.0
         cls.running    = True
         cls.paused     = True
-        cls.obs_timer  = 0.0
+        cls.obs_dist   = 0.0
         cls.coin_timer = 0.0
 
 

@@ -28,30 +28,39 @@ Steuerung wird beim Start gewählt:
 
 import random, sys, math
 from ursina import *
+import time as pytime   # ursinas `time` (mit dt) bleibt unberührt
 from osc_input import (start_osc_server, poll_actions, clear_actions, poll_pause,
-                       set_active_sources, OSC_PORT)
+                       poll_start, set_active_sources, OSC_PORT)
 
 from constants import (
     C_SKY, C_AMBIENT,
-    LANES, LANE_COUNT, SPAWN_Z, DESPAWN_Z,
+    LANES, LANE_COUNT, SPAWN_Z, SPAWN_GAP, DESPAWN_Z,
+    OBS_SPACING, DOUBLE_SPAWN_CHANCE, TRAIN_WALL_MARGIN_S,
     TILE_LEN, TILE_COUNT,
-    SPEED_INC, JUMP_VEL, GRAVITY,
+    SPEED_INC, MAX_SPD, JUMP_VEL, GRAVITY,
     PLAYER_BASE_Y, PLAYER_SY,
     TRAIN_TOP,
-    MAX_LIVES, INVINCIBLE, COIN_SCORE,
+    INVINCIBLE, COIN_SCORE,
 )
 from game_state  import GS, PlayerState
 from player      import Player
-from obstacles   import Obstacle
+from obstacles   import Obstacle, TRAIN_LENGTHS
 from coins       import Coin
 from world       import GroundTile, SidewalkTile, make_buildings
 from hud         import PlayerHud
 from menu        import StartMenu
+import leaderboard
+from leaderboard import LeaderboardView, MAX_NAME_LEN
 
 # ── Kamera-Parameter ──────────────────────────────────────────────────
+# Flache Neigung → Spieler steht im unteren Bilddrittel, man sieht weiter voraus.
+# (Ursina-FOV 40° ist horizontal → bei 16:9 nur ca. ±11,5° vertikal.)
 CAM_Y      = 6.0
-CAM_ROT_X  = 18.0
+CAM_ROT_X  = 10.0     # vorher 18 (Spieler fast in Bildmitte)
 CAM_Z_BASE = -18.0
+# Wie stark die Kamera dem Spieler beim Zurückstoßen nach hinten folgt.
+# Bei flacher Neigung muss sie mehr mitgehen, sonst rutscht er unten aus dem Bild.
+CAM_FOLLOW_Z = 0.75   # vorher 0.35
 
 # Signalfarben + seitlicher Versatz pro Spieler (in einem Bildschirm)
 P1_COLOR  = color.cyan
@@ -74,7 +83,9 @@ def _px_load(*a, **kw):
 app.loader.loadTexture = _px_load
 
 window.color = C_SKY
-Entity(model='sphere', texture='textures/sky.png', scale=300,
+# Himmelskugel muss größer sein als die Sichtweite (Straße bis z ≈ 330),
+# sonst verdeckt sie die weit entfernten Häuser/Straße
+Entity(model='sphere', texture='textures/sky.png', scale=1000,
        double_sided=True, unlit=True, eternal=True)
 
 
@@ -102,15 +113,85 @@ pause_text:   Text | None = None
 result_text:  Text | None = None
 result_sub:   Text | None = None
 
+# Bestenliste nach Game Over (nur Einzelspieler)
+gameover_board: LeaderboardView | None = None
+name_prompt:  Text | None = None
+name_line:    Text | None = None
+# Läuft gerade eine Namenseingabe? {'src', 'score', 'coins', 'name'} oder None
+name_entry:   dict | None = None
+
+# Start-Geste (OSC /game/<quelle>/start): im Menü → Spiel starten,
+# nach Game Over → zurück ins Menü (frühestens GESTURE_GAMEOVER_DELAY s danach)
+GESTURE_GAMEOVER_DELAY = 2.0
+gameover_at = 0.0
+MENU_HINT_GAMEOVER = 'R  oder  beide Arme hoch  –  zurück zum Menü'
+
 
 # ── Spawn ─────────────────────────────────────────────────────────────
 
-def _spawn_obstacle():
-    kind = random.choices(
-        ['car', 'train', 'train_long', 'train_xl', 'overhead'],
-        weights=[3, 6, 3, 1, 2]
-    )[0]
-    obstacles.append(Obstacle(random.randint(0, LANE_COUNT - 1), kind))
+def _lane_free_for_spawn(lane: int) -> bool:
+    """Spur ist frei, wenn kein Hindernis mehr in den Spawn-Bereich hineinragt.
+    Verhindert, dass ein neues Hindernis in einem noch nicht vorbeigefahrenen
+    (langen) Zug entsteht."""
+    for o in obstacles:
+        if not o._dead and o.lane == lane and o.z + o.hz > SPAWN_Z - SPAWN_GAP:
+            return False
+    return True
+
+
+# "Beutel" mit Spuren: jede Spur kommt pro 3er-Runde genau einmal dran, nur die
+# Reihenfolge ist zufällig → nie lange Serien auf derselben Spur.
+_lane_bag: list[int] = []
+
+_KINDS   = ['car', 'train', 'train_long', 'train_xl', 'overhead']
+_WEIGHTS = [3, 6, 3, 1, 2]
+
+
+def _draw_lane(exclude: set[int]) -> int | None:
+    """Nächste freie Spur aus dem Beutel. Belegte Spuren bleiben für später drin.
+    Passt keine Spur aus dem Beutel, wird irgendeine freie genommen."""
+    if not _lane_bag:
+        _lane_bag.extend(random.sample(range(LANE_COUNT), LANE_COUNT))
+    for lane in _lane_bag:
+        if lane not in exclude and _lane_free_for_spawn(lane):
+            _lane_bag.remove(lane)
+            return lane
+    free = [l for l in range(LANE_COUNT) if l not in exclude and _lane_free_for_spawn(l)]
+    return random.choice(free) if free else None
+
+
+def _train_would_block(lane: int, length: float) -> bool:
+    """True, wenn ein neuer Zug in `lane` zusammen mit Zügen in den beiden anderen
+    Spuren alle Spuren versperren würde. Geprüft wird die Zuglänge plus
+    ± (Tempo × TRAIN_WALL_MARGIN_S), damit auch der Wechsel dorthin noch klappt."""
+    margin = GS.speed * TRAIN_WALL_MARGIN_S
+    lo, hi = SPAWN_Z - margin, SPAWN_Z + length + margin
+    blocked = {o.lane for o in obstacles
+               if not o._dead and o.kind == 'train' and o.lane != lane
+               and o.z - o.hz < hi and o.z + o.hz > lo}
+    return len(blocked) >= LANE_COUNT - 1
+
+
+def _pick_kind(lane: int) -> str:
+    kind = random.choices(_KINDS, weights=_WEIGHTS)[0]
+    # Würde der Zug die letzte freie Spur dichtmachen → Auto oder Balken stattdessen
+    if kind.startswith('train') and _train_would_block(lane, TRAIN_LENGTHS[kind][1]):
+        kind = random.choice(['car', 'overhead'])
+    return kind
+
+
+def _spawn_obstacle() -> bool:
+    """Spawnt ein Hindernis (mit DOUBLE_SPAWN_CHANCE zwei nebeneinander).
+    False, wenn gerade keine Spur frei ist."""
+    count = 2 if random.random() < DOUBLE_SPAWN_CHANCE else 1
+    used: set[int] = set()
+    for _ in range(count):
+        lane = _draw_lane(used)
+        if lane is None:
+            break
+        obstacles.append(Obstacle(lane, _pick_kind(lane)))
+        used.add(lane)
+    return bool(used)
 
 
 def _spawn_coins():
@@ -150,16 +231,14 @@ def _check_collisions(side: Side) -> bool:
                 continue
             if abs(o.x - player.x) >= o.hw + phw - 0.05:
                 continue
-            if abs(o.z - player.z) >= o.hz + 0.4:
+            if not o.z_overlaps(player.z, 0.4):
                 continue
             plat_top  = o.y + o.hh
-            tol_down  = 1.0 if o.has_ramp else 0.5
-            if player_bottom <= plat_top + 0.3 and player_bottom >= plat_top - tol_down:
+            if plat_top - 0.5 <= player_bottom <= plat_top + 0.3:
                 player.y          = plat_top + phh
                 player.vel_y      = 0.0
                 player.is_jumping = False
                 player.platform   = o
-                player._ramp_jump = False
                 break
 
     # ── Körper-Kollision mit Hindernissen ─────────────────────────────
@@ -168,11 +247,6 @@ def _check_collisions(side: Side) -> bool:
         for o in obstacles:
             if o._dead:
                 continue
-            if o.has_ramp and abs(o.x - player.x) < o.hw + 0.5:
-                train_front = o.z - o.hz
-                in_ramp_zone = 0.3 <= train_front <= 3.3
-                if player._ramp_jump or in_ramp_zone:
-                    continue
             if o.hits_body(player):
                 hit = True
                 break
@@ -193,9 +267,6 @@ def _check_collisions(side: Side) -> bool:
             c._dead = True
             state.coins += 1
             destroy(c)
-            if state.coins % 50 == 0 and state.lives < MAX_LIVES:
-                state.lives += 1
-                side.hud.update(state)
     return False
 
 
@@ -203,10 +274,14 @@ def _check_collisions(side: Side) -> bool:
 
 def _end_match(dead_sides: list[Side]):
     """Sobald ein Spieler stirbt, endet das Match. In 2P gewinnt der andere,
-    sterben beide im selben Frame, ist es unentschieden."""
+    sterben beide im selben Frame, ist es unentschieden.
+    Im Einzelspieler folgt die Bestenliste (ggf. mit Namenseingabe)."""
+    global name_entry, gameover_at
     GS.running = False
+    gameover_at = pytime.monotonic()
     set_active_sources(())
     if len(sides) == 2:
+        result_text.y, result_sub.y = 0.06, -0.06
         if len(dead_sides) >= 2:
             result_text.text  = 'UNENTSCHIEDEN'
             result_text.color = color.white
@@ -219,22 +294,75 @@ def _end_match(dead_sides: list[Side]):
         result_sub.text = f'P1: {sides[0].state.score}   P2: {sides[1].state.score}'
     else:
         dead = dead_sides[0]
+        result_text.y, result_sub.y = 0.36, 0.28   # oben Platz für die Bestenliste
         result_text.text  = 'GAME OVER'
         result_text.color = color.red
         result_sub.text   = f'Score: {dead.state.score}   Münzen: {dead.state.coins}'
+        gameover_board.show(dead.src)
+        if leaderboard.qualifies(dead.src, dead.state.score):
+            name_entry = {'src': dead.src, 'score': dead.state.score,
+                          'coins': dead.state.coins, 'name': ''}
+            _update_name_prompt()
     result_text.enabled  = True
     result_sub.enabled   = True
-    restart_hint.text    = 'R  –  zurück zum Menü'
+    restart_hint.text    = ('Name tippen  –  ENTER speichern  –  ESC überspringen'
+                            if name_entry else MENU_HINT_GAMEOVER)
     restart_hint.enabled = True
 
 
+# ── Bestenliste: Namenseingabe ────────────────────────────────────────
+
+def _update_name_prompt():
+    name_prompt.text    = 'NEUER HIGHSCORE!  Dein Name:'
+    name_line.text      = name_entry['name'] + '_'
+    name_prompt.enabled = True
+    name_line.enabled   = True
+
+
+def _finish_name_entry(save: bool):
+    global name_entry
+    entry, name_entry = name_entry, None
+    highlight = None
+    if save:
+        highlight = leaderboard.add_entry(entry['src'], entry['name'], entry['score'], entry['coins'])
+    name_prompt.enabled = False
+    name_line.enabled   = False
+    gameover_board.show(entry['src'], highlight)
+    restart_hint.text = MENU_HINT_GAMEOVER
+
+
+def _handle_name_key(key: str):
+    if ' ' in key:                     # 'a up', 'a hold' … ignorieren
+        return
+    name = name_entry['name']
+    if key == 'enter':
+        _finish_name_entry(save=True)
+        return
+    if key == 'escape':
+        _finish_name_entry(save=False)
+        return
+    if key == 'backspace':
+        name = name[:-1]
+    elif len(name) < MAX_NAME_LEN:
+        if key == 'space' and name:
+            name += ' '
+        elif len(key) == 1 and (key.isalnum() or key in '-_'):
+            name += key.upper()
+    name_entry['name'] = name
+    _update_name_prompt()
+
+
 def _hide_overlays():
-    for t in (result_text, result_sub, pause_text):
+    global name_entry
+    name_entry = None
+    for t in (result_text, result_sub, pause_text, name_prompt, name_line):
         if t:
             t.text    = ''
             t.enabled = False
     if restart_hint:
         restart_hint.enabled = False
+    if gameover_board:
+        gameover_board.hide()
 
 
 def _osc_sources() -> set[str]:
@@ -274,6 +402,7 @@ def _start_match(cfg: dict):
     GS.reset()
     GS.running = True
     GS.paused  = False
+    _lane_bag.clear()
     clear_actions()
     _hide_overlays()
 
@@ -321,7 +450,24 @@ def _to_menu():
 
 # ── Haupt-Update ──────────────────────────────────────────────────────
 
+def _handle_start_gesture(sources: set[str]):
+    """Start-Geste auswerten. Im laufenden Spiel und während der Namenseingabe
+    wird sie ignoriert (die Queue wird trotzdem geleert, damit nichts nachwirkt)."""
+    if phase == 'menu':
+        cfg = menu.config()
+        # Nur starten, wenn die Geste von einer gewählten Quelle kommt –
+        # sonst könnte ein Zuschauer vor der Kamera eine Tastatur-Runde starten
+        if sources & set(cfg['sources']):
+            _start_match(cfg)
+    elif not GS.running and name_entry is None:
+        if pytime.monotonic() - gameover_at >= GESTURE_GAMEOVER_DELAY:
+            _to_menu()
+
+
 def update():
+    starts = poll_start()
+    if starts:
+        _handle_start_gesture(starts)
     if phase != 'playing':
         return
     # OSC-Pause (Vision/Voice) – muss auch im pausierten Zustand greifen
@@ -334,11 +480,14 @@ def update():
     if GS.running:
         # ── geteilter Track ───────────────────────────────────────────
         GS.elapsed += dt
-        GS.speed   += SPEED_INC * dt     # pro Sekunde → unabhängig von der Bildrate
-        GS.obs_timer += dt
-        if GS.obs_timer >= GS.obs_interval():
-            _spawn_obstacle()
-            GS.obs_timer = 0
+        # pro Sekunde → unabhängig von der Bildrate; gedeckelt bei MAX_SPD
+        GS.speed    = min(MAX_SPD, GS.speed + SPEED_INC * dt)
+        # Spawn nach zurückgelegter Strecke, nicht nach Zeit → der physische
+        # Abstand zwischen Hindernissen bleibt bei jedem Tempo gleich.
+        # Ist gerade keine Spur frei, wird im nächsten Frame erneut versucht.
+        GS.obs_dist += GS.speed * dt
+        if GS.obs_dist >= OBS_SPACING and _spawn_obstacle():
+            GS.obs_dist = 0.0
         GS.coin_timer += dt
         if GS.coin_timer >= 1.2:
             _spawn_coins()
@@ -372,7 +521,7 @@ def update():
     if shake > 0:
         cam_x += random.uniform(-0.45, 0.45) * (shake / 0.5)
     camera.x = lerp(camera.x, cam_x, min(7 * dt, 1))
-    camera.z = lerp(camera.z, CAM_Z_BASE + avg_z * 0.35, min(10 * dt, 1))
+    camera.z = lerp(camera.z, CAM_Z_BASE + avg_z * CAM_FOLLOW_Z, min(10 * dt, 1))
 
     # ── tote Entities entfernen (geteilt) ─────────────────────────────
     obstacles[:] = [o for o in obstacles if not o._dead]
@@ -404,6 +553,11 @@ def _handle_keyboard(side: Side, key):
 
 
 def input(key):
+    # Während der Namenseingabe gehen alle Tasten (auch R, P, ESC) an das Namensfeld
+    if name_entry is not None:
+        _handle_name_key(key)
+        return
+
     if key == 'escape':
         sys.exit()
 
@@ -439,7 +593,7 @@ make_buildings()
 
 # Geteilte Bodenkacheln (recyceln sich, einmal erzeugen)
 for i in range(TILE_COUNT):
-    z = i * TILE_LEN - TILE_LEN
+    z = DESPAWN_Z + (i + 0.5) * TILE_LEN     # lückenlos von DESPAWN_Z bis ca. z = 330
     tiles.append(GroundTile(z))
     tiles.append(SidewalkTile(z, -1))
     tiles.append(SidewalkTile(z, +1))
@@ -457,6 +611,14 @@ result_text.enabled = False
 result_sub = Text('', parent=camera.ui, origin=(0, 0), position=(0, -0.06),
                   scale=1.4, color=color.white, z=0)
 result_sub.enabled = False
+
+gameover_board = LeaderboardView(x_center=0.0, y_top=0.20)
+name_prompt = Text('', parent=camera.ui, origin=(0, 0), position=(0, -0.24),
+                   scale=1.3, color=color.yellow, z=0)
+name_prompt.enabled = False
+name_line = Text('', parent=camera.ui, origin=(0, 0), position=(0, -0.31),
+                 scale=2.0, color=color.white, z=0)
+name_line.enabled = False
 
 GS.running = False
 GS.paused  = True
