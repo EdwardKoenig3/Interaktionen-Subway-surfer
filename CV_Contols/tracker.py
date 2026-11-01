@@ -225,6 +225,31 @@ class LaneSender:
         self._last = None
 
 
+class LostSender:
+    """Meldet dem Spiel, ob der Spieler gerade nicht erkannt wird (/game/vision/lost 1|0).
+
+    Das Spiel hält an, solange die Meldung „verloren" frisch ist – deshalb wird
+    sie alle `repeat_s` Sekunden wiederholt. Stürzt das Tracking ab, läuft das
+    Spiel nach kurzer Zeit von selbst weiter, statt ewig zu warten.
+    """
+
+    def __init__(self, client: SimpleUDPClient, repeat_s: float = 0.5):
+        self.client = client
+        self.repeat_s = repeat_s
+        self._lost = False
+        self._last_t = 0.0
+
+    def send(self, lost: bool) -> None:
+        now = time.monotonic()
+        changed = lost != self._lost
+        if changed or (lost and now - self._last_t >= self.repeat_s):
+            self.client.send_message("/game/vision/lost", [1 if lost else 0])
+            if changed:
+                print(f"/game/vision/lost {1 if lost else 0}")
+            self._lost = lost
+            self._last_t = now
+
+
 def analyze_person(person_kpts: Any, h: int, w: int, client: SimpleUDPClient, lane_sender: LaneSender, reference: Optional[Dict[str, float]] = None, last_zustand: str = "STEHT") -> Tuple[str, str]:
     reference = reference or get_default_reference()
     left_ratio = reference.get("left_ratio", 1/3)
@@ -326,15 +351,39 @@ def draw_selected_player(annotated: Any, selected_person: Optional[int], h: int)
         )
 
 
-def draw_player_lost(annotated: Any, h: int) -> None:
+def draw_player_lost(annotated: Any, h: int, lost_for: float,
+                     takeover_hold_s: Optional[float] = None) -> None:
+    """Hinweis „Spieler verloren"; mit `takeover_hold_s` zusätzlich, wie ein neuer Spieler übernimmt."""
     # Hinweis: cv2.putText kann keine Umlaute darstellen
     cv2.putText(
         annotated,
-        "Spieler verloren - suche weiter ... (R = Auswahlmodus)",
+        f"Spieler verloren ({lost_for:.0f} s) - warte auf dieselbe Person ... (R = Auswahlmodus)",
         (10, h - 20),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.8,
         (0, 0, 255),
+        2,
+    )
+    if takeover_hold_s is not None:
+        cv2.putText(
+            annotated,
+            f"Neuer Spieler? Linken Arm {takeover_hold_s:.0f} s oben halten",
+            (10, h - 70),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 165, 255),
+            2,
+        )
+
+
+def draw_perf(annotated: Any, w: int, fps: float, infer_ms: float, device: str) -> None:
+    cv2.putText(
+        annotated,
+        f"{fps:4.1f} FPS | YOLO {infer_ms:4.1f} ms | {device}",
+        (w - 430, 30),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (255, 255, 255),
         2,
     )
 

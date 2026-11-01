@@ -1,6 +1,9 @@
 __pycache__/
 .claude/
 
+# Wird beim ersten Start auf Intel-Rechnern aus yolo26n-pose.pt erzeugt (CvMain.py)
+*_openvino_model/
+
 # Bestenliste ist pro Rechner (siehe Spiel/leaderboard.py)
 Spiel/highscores*.json
 Spiel/highscores.tmp

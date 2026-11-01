@@ -14,6 +14,10 @@ Zwei getrennte Namespaces, damit zwei Spieler unabhängig gesteuert werden:
 Die alten Adressen ohne Präfix (/game/left, /game/jump, …) werden weiterhin auf
 den Vision-Spieler gemappt (Rückwärtskompatibilität für bestehende Sender).
 
+Dazu /game/<quelle>/lost 1|0: Die Kamera-Steuerung meldet, dass ihr Spieler
+gerade nicht erkannt wird – das Spiel hält dann an, bis er wieder da ist. Die
+Meldung „1" gilt nur LOST_STALE_S Sekunden und wird vom Sender wiederholt.
+
 Beispiel-Sender (gleicher Rechner → "127.0.0.1", sonst IP des Spiel-Rechners):
     from pythonosc.udp_client import SimpleUDPClient
     client = SimpleUDPClient("127.0.0.1", 9000)
@@ -26,6 +30,7 @@ Der Port kommt aus network.json im Projekt-Root (Standard 9000).
 import json
 import queue
 import threading
+import time
 from pathlib import Path
 
 try:
@@ -71,11 +76,23 @@ _start_q: queue.Queue = queue.Queue()
 # die Queues voll und alte Befehle werden später auf einmal ausgeführt.
 _active_sources: frozenset[str] = frozenset()
 
+# Spieler der Quelle gilt bis zu diesem Zeitpunkt (time.monotonic) als „nicht
+# erkannt". Läuft ab, wenn keine neue Meldung kommt – z.B. weil das Tracking
+# abgestürzt ist –, damit das Spiel nicht ewig angehalten bleibt.
+LOST_STALE_S = 2.0
+_lost_until: dict[str, float] = {"vision": 0.0, "voice": 0.0}
+
 
 def set_active_sources(sources) -> None:
     """Legt fest, welche Quellen ('vision', 'voice') gerade Aktionen liefern dürfen."""
     global _active_sources
     _active_sources = frozenset(sources)
+
+
+def player_lost(sources) -> bool:
+    """True, wenn eine der Quellen gerade meldet, dass ihr Spieler nicht erkannt wird."""
+    now = time.monotonic()
+    return any(_lost_until.get(s, 0.0) > now for s in sources)
 
 
 def start_osc_server() -> bool:
@@ -112,6 +129,14 @@ def start_osc_server() -> bool:
             _start_q.put(source)
         return _h
 
+    def _lost(source):
+        def _h(addr, *args):
+            lost = bool(args[0]) if args else True
+            if lost != player_lost((source,)):   # Wiederholungen nicht loggen
+                _log(addr, *args)
+            _lost_until[source] = time.monotonic() + LOST_STALE_S if lost else 0.0
+        return _h
+
     def _map_namespace(prefix, source):
         dispatcher.map(f"{prefix}/left",   _lane(source, 0))
         dispatcher.map(f"{prefix}/center", _lane(source, 1))
@@ -121,6 +146,7 @@ def start_osc_server() -> bool:
         dispatcher.map(f"{prefix}/stand",  _action(source, "stand"))
         dispatcher.map(f"{prefix}/pause",  _pause_handler)
         dispatcher.map(f"{prefix}/start",  _start(source))
+        dispatcher.map(f"{prefix}/lost",   _lost(source))
 
     _map_namespace("/game/vision", "vision")
     _map_namespace("/game/voice",  "voice")
@@ -135,8 +161,8 @@ def start_osc_server() -> bool:
 
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print(f"[OSC] Server läuft auf {OSC_IP}:{OSC_PORT}")
-    print("[OSC] Vision: /game/vision/{left,center,right,jump,slide,stand,pause,start}")
-    print("[OSC] Voice:  /game/voice/{left,center,right,jump,slide,stand,pause,start}")
+    print("[OSC] Vision: /game/vision/{left,center,right,jump,slide,stand,pause,start,lost}")
+    print("[OSC] Voice:  /game/voice/{left,center,right,jump,slide,stand,pause,start,lost}")
     return True
 
 

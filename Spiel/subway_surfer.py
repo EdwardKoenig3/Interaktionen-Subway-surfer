@@ -24,13 +24,16 @@ Steuerung wird beim Start gewählt:
     TASTATUR  – Spieler 1 A/D/W/S, Spieler 2 Pfeiltasten (Einzelspieler: beides)
     VISION    – OSC /game/vision/{left,center,right,jump,slide,stand}
     VOICE     – OSC /game/voice/{left,center,right,jump,slide,stand}
+
+Meldet die Kamera /game/vision/lost 1 (Spieler nicht erkannt), hält das Spiel an,
+bis er wieder vor der Kamera steht.
 """
 
 import random, sys, math
 from ursina import *
 import time as pytime   # ursinas `time` (mit dt) bleibt unberührt
 from osc_input import (start_osc_server, poll_actions, clear_actions, poll_pause,
-                       poll_start, set_active_sources, OSC_PORT)
+                       poll_start, set_active_sources, player_lost, OSC_PORT)
 
 from constants import (
     C_SKY, C_AMBIENT,
@@ -110,8 +113,15 @@ phase = 'menu'        # 'menu' | 'playing'
 menu: StartMenu | None = None
 restart_hint: Text | None = None
 pause_text:   Text | None = None
+hold_text:    Text | None = None
+hold_sub:     Text | None = None
 result_text:  Text | None = None
 result_sub:   Text | None = None
+
+# GS.paused = manuelle Pause (P / OSC .../pause) ODER Tracking-Pause (die Kamera
+# erkennt den Spieler gerade nicht, OSC .../lost) – beide getrennt merken
+manual_pause  = False
+tracking_hold = False
 
 # Bestenliste nach Game Over (nur Einzelspieler)
 gameover_board: LeaderboardView | None = None
@@ -394,6 +404,9 @@ def _hide_overlays():
         if t:
             t.text    = ''
             t.enabled = False
+    for t in (hold_text, hold_sub):   # feste Texte, nur ausblenden
+        if t:
+            t.enabled = False
     if restart_hint:
         restart_hint.enabled = False
     if gameover_board:
@@ -404,13 +417,30 @@ def _osc_sources() -> set[str]:
     return {s.src for s in sides if s.src in ('vision', 'voice')}
 
 
-def _set_paused(p: bool):
-    GS.paused = p
+def _apply_pause():
+    GS.paused = manual_pause or tracking_hold
     # In der Pause eintreffende Gesten/Sprachbefehle verwerfen statt puffern
-    set_active_sources(() if p else _osc_sources())
+    set_active_sources(() if GS.paused else _osc_sources())
     if pause_text:
-        pause_text.text    = 'PAUSE' if p else ''
-        pause_text.enabled = p
+        pause_text.text    = 'PAUSE' if manual_pause else ''
+        pause_text.enabled = manual_pause
+    for t in (hold_text, hold_sub):
+        if t:
+            t.enabled = tracking_hold and not manual_pause
+
+
+def _set_paused(p: bool):
+    global manual_pause
+    manual_pause = p
+    _apply_pause()
+
+
+def _set_tracking_hold(hold: bool):
+    """Kamera erkennt den Spieler nicht → anhalten, bis er wieder da ist."""
+    global tracking_hold
+    if hold != tracking_hold:
+        tracking_hold = hold
+        _apply_pause()
 
 
 def _teardown_match():
@@ -431,12 +461,13 @@ def _teardown_match():
 
 
 def _start_match(cfg: dict):
-    global phase
+    global phase, manual_pause, tracking_hold
     _teardown_match()
 
     GS.reset()
     GS.running = True
     GS.paused  = False
+    manual_pause = tracking_hold = False
     _lane_bag.clear()
     clear_actions()
     _hide_overlays()
@@ -473,11 +504,12 @@ def _start_match(cfg: dict):
 
 
 def _to_menu():
-    global phase
+    global phase, manual_pause, tracking_hold
     _teardown_match()
     _hide_overlays()
     GS.running = False
     GS.paused  = True
+    manual_pause = tracking_hold = False
     set_active_sources(())
     phase = 'menu'
     menu.set_visible(True)
@@ -507,7 +539,11 @@ def update():
         return
     # OSC-Pause (Vision/Voice) – muss auch im pausierten Zustand greifen
     if GS.running and poll_pause():
-        _set_paused(not GS.paused)
+        _set_paused(not manual_pause)
+    # Kamera erkennt den Spieler gerade nicht (OSC .../lost) → warten, bis er
+    # wieder vor der Kamera steht, statt ihn ungesteuert weiterlaufen zu lassen
+    if GS.running:
+        _set_tracking_hold(player_lost(_osc_sources()))
     if GS.paused:
         return
     dt = time.dt
@@ -607,7 +643,7 @@ def input(key):
             _to_menu()
         return
     if key == 'p':
-        _set_paused(not GS.paused)
+        _set_paused(not manual_pause)
         return
     if GS.paused:
         return
@@ -640,6 +676,12 @@ restart_hint.enabled = False
 pause_text = Text('', parent=camera.ui, origin=(0, 0), position=(0, 0.0),
                   scale=2.6, color=color.white, z=0)
 pause_text.enabled = False
+hold_text = Text('SPIELER NICHT ERKANNT', parent=camera.ui, origin=(0, 0), position=(0, 0.05),
+                 scale=2.4, color=color.orange, z=0)
+hold_text.enabled = False
+hold_sub = Text('Zurück vor die Kamera stellen – dann geht es weiter', parent=camera.ui,
+                origin=(0, 0), position=(0, -0.05), scale=1.3, color=color.white, z=0)
+hold_sub.enabled = False
 result_text = Text('', parent=camera.ui, origin=(0, 0), position=(0, 0.06),
                    scale=3.0, color=color.yellow, z=0)
 result_text.enabled = False
