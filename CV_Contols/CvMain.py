@@ -11,6 +11,7 @@ from ultralytics import YOLO
 from pythonosc.udp_client import SimpleUDPClient
 import camera
 import identity
+import poses
 import tracker
 
 _PROJECT_DIR = Path(__file__).resolve().parent.parent
@@ -33,6 +34,10 @@ TAKEOVER_HOLD_S = 2.0            # ... indem sie den linken Arm so lange oben h�
 WINDOW = "Pose Tracking"
 # "klein": Bild-im-Bild über dem Spiel, wenn alles auf einem PC läuft
 PREVIEW_SIZES = {"gross": (1920, 1080), "klein": (640, 360)}
+
+# Kamera-Spieler: OSC-Namespace und Farbe (BGR, wie im Spiel: P1 cyan, P2 orange)
+SLOTS = (("/game/vision", (255, 255, 0)), ("/game/vision2", (0, 165, 255)))
+POWER_MSG_S = 1.0                # so lange steht "SCHILD!" o.ä. im Kamerabild
 
 
 def _load_network_config() -> tuple[str, int]:
@@ -128,6 +133,236 @@ def _load_model(device: str, imgsz: int, cam_w: int, cam_h: int) -> tuple[YOLO, 
     return model, device, imgsz
 
 
+class PlayerSlot:
+    """Ein Kamera-Spieler: Auswahl, Kalibrierung, Wiedererkennung und Gesten → OSC.
+
+    Im 1-Spieler-Modus gibt es einen Platz für das ganze Bild – alles wie bisher.
+    Im 2-Spieler-Modus hat jeder Platz eine Bildhälfte (`zone`): Dort wird er
+    ausgewählt und dort liegen seine drei Spuren. Platz 2 sendet an /game/vision2/*.
+    """
+
+    def __init__(self, num: int, client: SimpleUDPClient, zone: tuple[float, float], labeled: bool):
+        self.num = num
+        self.prefix, self.color = SLOTS[num - 1]
+        self.zone = zone                        # (von, bis) als Anteil der Bildbreite
+        self.label = f"P{num}" if labeled else ""
+        self.client = client
+        self.lane_sender = tracker.LaneSender(client, self.prefix)
+        self.action_sender = tracker.ActionSender(client, self.prefix)
+        self.lost_sender = tracker.LostSender(client, self.prefix)
+        self.selected = False
+        self.person_idx = None      # YOLO-Index bei der Auswahl (nur zur Anzeige)
+        self.position = None        # letzte Hüftposition
+        self.reference = None
+        self.calib_deadline = 0.0
+        self.lost_since = None      # Zeitpunkt, seit dem der Spieler nicht gefunden wird
+        self.lock = identity.PlayerLock()   # merkt sich, wie der Spieler aussieht
+        self.poses = poses.PoseTrigger()    # Power-up-Haltungen
+        self.takeover_since = None  # seit wann jemand (bei verlorenem Spieler) den linken Arm hebt
+        self.reset_arm_since = None
+        self.start_arms_since = None
+        self.start_ready = False    # Start-Geste lange genug gehalten (gesendet wird in main)
+        self.start_sent = False
+        self.lane, self.zustand, self.last_zustand = "MITTE", "STEHT", "STEHT"
+        self.power_msg = None       # (Text, bis wann) – Rückmeldung im Kamerabild
+
+    @property
+    def calibrated(self) -> bool:
+        return self.selected and self.reference.get("nose_y") is not None
+
+    def _say(self, text: str) -> None:
+        print(f"{self.label}: {text}" if self.label else text)
+
+    def in_zone(self, x: float, w: int) -> bool:
+        return self.zone[0] * w <= x <= self.zone[1] * w
+
+    def zone_center(self, w: int) -> int:
+        return int(w * (self.zone[0] + self.zone[1]) / 2)
+
+    def select(self, idx: int, huefte_x: float, huefte_y: float, how: str, now: float) -> None:
+        self.selected = True
+        self.person_idx = idx
+        self.position = (huefte_x, huefte_y)
+        self.reference = tracker.load_reference()
+        # Nasen- und Körperhöhe werden nach dem Countdown neu gemessen
+        self.reference["nose_y"] = None
+        self.reference["body_height"] = None
+        self.calib_deadline = now + CALIB_DELAY_S
+        self.lost_since = None
+        self.lock = identity.PlayerLock()
+        self.poses.reset()
+        self.takeover_since = None
+        self.reset_arm_since = None
+        self.start_arms_since = None
+        self.start_ready = self.start_sent = False
+        self.lane, self.zustand, self.last_zustand = "MITTE", "STEHT", "STEHT"
+        self.lane_sender.reset()
+        self.action_sender.reset()
+        self.lost_sender.send(False)
+        self._say(f"Spieler {idx} {how} ausgewählt – Kalibrierung in {CALIB_DELAY_S:.0f} s")
+
+    def deselect(self, reason: str) -> None:
+        self.selected = False
+        self.position = None
+        self.reference = None
+        self.reset_arm_since = None
+        self.lost_since = None
+        self.start_ready = False
+        self.action_sender.update("STEHT")   # ein gehaltenes Ducken sauber beenden
+        self.lost_sender.send(False)
+        self._say(f"{reason} – zurück in Auswahlmodus")
+
+    def send_start(self) -> None:
+        self.client.send_message(f"{self.prefix}/start", [])
+        print(f"{self.prefix}/start")
+        self.start_sent = True
+
+    def track(self, frame, persons, all_persons, now, annotated, h, w, sig_of):
+        """Spieler in diesem Bild suchen und seine Gesten auswerten. `persons` sind
+        die noch nicht vergebenen Personen. Gibt die Keypoints der Person zurück, die
+        dieser Platz nun belegt – oder None."""
+        # Gesucht wird um die letzte bekannte Position. Ist das Aussehen des
+        # Spielers gelernt, zählt nach einem längeren Aussetzer nur noch die
+        # Wiedererkennung – eine andere Person übernimmt NICHT einfach die
+        # Steuerung. Die Kalibrierung bleibt dabei erhalten.
+        body_h = self.reference.get("body_height")
+        max_dist = body_h * TRACK_MAX_DIST_FRACTION if body_h else TRACK_MAX_DIST_FALLBACK
+        lost_for = None if self.lost_since is None else now - self.lost_since
+        if self.lock.identity.ready:
+            best = self.lock.find(frame, persons, self.position, max_dist, lost_for,
+                                  sigs=[sig_of(p[1]) for p in persons])
+            identity.draw_similarities(annotated, persons, self.lock.sims,
+                                       label=self.label or "ID", row=self.num - 1)
+        else:
+            if lost_for is not None:
+                max_dist += TRACK_REGAIN_PX_PER_S * lost_for
+            best = tracker.find_best_person(persons, self.position, max_dist) if persons else None
+
+        if best is None:
+            return self._lost(persons, now, annotated, h, w)
+        self._found(best, all_persons, now, annotated, h, w, sig_of)
+        return best[0]
+
+    def _lost(self, persons, now, annotated, h, w):
+        if self.lost_since is None:
+            self.lost_since = now
+            self._say("Spieler verloren – warte, bis er wiedererkannt wird (Kalibrierung bleibt erhalten)")
+        lost_for = now - self.lost_since
+        # Spiel anhalten, bis der Spieler wieder da ist (erst nach der Kalibrierung)
+        self.lost_sender.send(self.calibrated and lost_for >= LOST_PAUSE_S)
+        self.reset_arm_since = None
+        self.start_arms_since = None
+        self.start_ready = False
+
+        # Lange weg → eine andere Person (in seiner Bildhälfte) darf mit dem linken Arm übernehmen
+        takeover = lost_for >= TAKEOVER_AFTER_S
+        tracker.draw_player_lost(annotated, h, lost_for, TAKEOVER_HOLD_S if takeover else None,
+                                 label=self.label, line=self.num - 1)
+        raiser = next((p for p in persons
+                       if self.in_zone(p[2], w) and tracker.wrist_raised(p[1], "left")), None) if takeover else None
+        if raiser is None:
+            self.takeover_since = None
+        elif self.takeover_since is None:
+            self.takeover_since = now
+        elif now - self.takeover_since >= TAKEOVER_HOLD_S:
+            self.select(raiser[0], raiser[2], raiser[3], "per Übernahme (linker Arm)", now)
+            return raiser[1]
+        return None
+
+    def _found(self, best, all_persons, now, annotated, h, w, sig_of):
+        person_kpts, huefte_x, huefte_y = best
+        if self.lost_since is not None:
+            self._say(f"Spieler nach {now - self.lost_since:.1f} s wiedererkannt")
+            self.lost_since = None
+            self.takeover_since = None
+        self.lost_sender.send(False)
+        self.position = (huefte_x, huefte_y)
+
+        # Aussehen lernen (v.a. während des Countdowns) – nicht, solange sich
+        # jemand mit dem Spieler überdeckt, sonst mischen sich die Farben
+        if not self.lock.identity.complete and not identity.overlaps_other(person_kpts, all_persons):
+            self.lock.identity.learn(sig_of(person_kpts))
+
+        status_color = self.color if self.label else (0, 255, 255)
+        if not self.calibrated:
+            # Countdown, damit der Spieler Zeit hat, sich in Spielposition zu stellen
+            remaining = self.calib_deadline - now
+            if remaining > 0:
+                tracker.draw_countdown(annotated, remaining, h, w, cx=self.zone_center(w), color=status_color)
+            elif tracker.visible(person_kpts[0]):
+                # Nur im Speicher – wird bei jeder Auswahl neu gemessen,
+                # daher nicht mehr in player_references.json geschrieben
+                self.reference["nose_y"] = float(person_kpts[0][1])
+                measured_h, quelle = tracker.measure_body_height(person_kpts)
+                self.reference["body_height"] = measured_h
+                bh_txt = f"{measured_h:.1f} ({quelle})" if measured_h else f"n/a ({quelle}) → Pixel-Fallback"
+                self._say(f"Kalibriert: nose_y={self.reference['nose_y']:.1f}, body_height={bh_txt}")
+        else:
+            self.lane, self.zustand = tracker.analyze_person(
+                person_kpts, w, self.lane_sender, self.action_sender, self.reference,
+                self.last_zustand, self.zone)
+            self.last_zustand = self.zustand
+            # Power-ups per Körperhaltung – die Abklingzeit verwaltet das Spiel
+            power = self.poses.update(person_kpts, now)
+            if power is not None:
+                self.client.send_message(f"{self.prefix}/power", [power])
+                print(f"{self.prefix}/power {power}")
+                self.power_msg = (f"{poses.LABELS[power]}!", now + POWER_MSG_S)
+        tracker.draw_player_status(annotated, huefte_x, huefte_y, self.lane, self.zustand,
+                                   label=self.label, color=status_color)
+        self._draw_power(annotated, person_kpts, now)
+
+        ref_h = self.reference.get("body_height")
+        left_up = tracker.wrist_raised(person_kpts, "left", ref_h)
+        right_up = tracker.wrist_raised(person_kpts, "right", ref_h)
+
+        # Start: beide Arme START_HOLD_S oben (erst nach der Kalibrierung). Gesendet
+        # wird in main(), sobald alle Spieler bereit sind. Danach müssen die Arme
+        # erst wieder runter, bevor erneut gesendet wird.
+        if self.calibrated and left_up and right_up:
+            if self.start_arms_since is None:
+                self.start_arms_since = now
+            self.start_ready = now - self.start_arms_since >= START_HOLD_S
+        else:
+            self.start_arms_since = None
+            self.start_ready = False
+            self.start_sent = False
+
+        # Reset nur durch den Spieler selbst und nur, wenn NUR der rechte Arm
+        # RESET_HOLD_S oben bleibt – kurzes Armhochreißen beim Sprung und die
+        # Start-Geste (beide Arme) zählen nicht.
+        if right_up and not left_up:
+            if self.reset_arm_since is None:
+                self.reset_arm_since = now
+            elif now - self.reset_arm_since >= RESET_HOLD_S:
+                self.deselect("Armheben erkannt")
+        else:
+            self.reset_arm_since = None
+
+    def _draw_power(self, annotated, person_kpts, now) -> None:
+        """Über dem Kopf: Fortschritt einer gehaltenen Power-up-Haltung bzw. "SCHILD!"."""
+        x, y = float(person_kpts[0][0]), float(person_kpts[0][1]) - 60
+        progress = self.poses.progress(now)
+        if progress is not None:
+            poses.draw_progress(annotated, x, y, progress[0], progress[1], self.color)
+        elif self.power_msg is not None and now < self.power_msg[1]:
+            cv2.putText(annotated, self.power_msg[0], (int(x) - 70, int(y) - 48),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, self.color, 3)
+
+
+def _make_slots(n: int, client: SimpleUDPClient) -> list[PlayerSlot]:
+    """1 Spieler: ganzes Bild. 2 Spieler: linke Hälfte P1, rechte Hälfte P2."""
+    zones = [(0.0, 1.0)] if n == 1 else [(0.0, 0.5), (0.5, 1.0)]
+    return [PlayerSlot(i + 1, client, zone, labeled=n > 1) for i, zone in enumerate(zones)]
+
+
+def _mode_hint(n: int) -> str:
+    if n == 1:
+        return "Modus: 1 Spieler vor der Kamera (Taste M: 2 Spieler)."
+    return ("Modus: 2 Spieler vor der Kamera – links P1 (VISION), rechts P2 (VISION 2). "
+            "Im Spiel-Menü 2 Spieler mit rechts VISION 2 wählen. Taste M: 1 Spieler.")
+
+
 def main() -> None:
     default_ip, default_port = _load_network_config()
     parser = argparse.ArgumentParser(description="Pose Tracking mit Webcam oder Link to Windows Kamera")
@@ -144,6 +379,9 @@ def main() -> None:
     parser.add_argument("--preview", choices=list(PREVIEW_SIZES) + ["aus"], default="gross",
                         help="Kamerafenster: 'gross' (default), 'klein' (Bild-im-Bild immer im Vordergrund, "
                              "für einen PC mit Spiel), 'aus' (kein Fenster, Auswahl nur per Geste, Ende mit Strg+C)")
+    parser.add_argument("--spieler", type=int, choices=(1, 2), default=1,
+                        help="Spieler vor der Kamera: 1 (default, wie bisher) oder 2 – dann teilen sie sich "
+                             "das Bild: links P1 (/game/vision), rechts P2 (/game/vision2). Umschalten im Fenster: M")
     parser.add_argument("--cam-width", type=int, default=1280,
                         help="Kamera-Aufnahmebreite in Pixeln. Default 1280.")
     parser.add_argument("--cam-height", type=int, default=720,
@@ -196,7 +434,9 @@ def main() -> None:
     print("Tracking läuft. Mit 'q' beenden. 'r' = Auswahlmodus. "
           "Auswahl: linken Arm heben (YOLO-links) oder Taste 0-9. "
           f"Reset: rechten Arm {RESET_HOLD_S:.0f} s oben halten. "
-          f"Spiel starten / zurück ins Menü: beide Arme {START_HOLD_S:.0f} s oben halten.", flush=True)
+          f"Spiel starten / zurück ins Menü: beide Arme {START_HOLD_S:.0f} s oben halten. "
+          "Power-ups: Hände vor die Brust (Schild), Arme ausbreiten (Gleiten), "
+          "Hände in die Hüften (Magnet).", flush=True)
 
     window = args.preview != "aus"
     if window:
@@ -213,56 +453,10 @@ def main() -> None:
         cv2.imshow(WINDOW, img)
         return cv2.waitKey(1) & 0xFF
 
-    lane_sender = tracker.LaneSender(client)
-    lost_sender = tracker.LostSender(client)
-    position = "MITTE"
-    zustand = "STEHT"
-    last_zustand = "STEHT"
-    selected_person = None      # YOLO-Index bei der Auswahl (nur zur Anzeige)
-    selected_position = None    # None = Auswahlmodus
-    selected_reference = None
-    calib_deadline = 0.0
-    reset_arm_since = None
-    start_arms_since = None
-    start_sent = False
-    lost_since = None           # Zeitpunkt, seit dem der Spieler nicht gefunden wird
-    lock = identity.PlayerLock()  # merkt sich, wie der Spieler aussieht
-    takeover_since = None       # seit wann jemand (bei verlorenem Spieler) den linken Arm hebt
+    slots = _make_slots(args.spieler, client)
+    print(_mode_hint(len(slots)))
     frame_dt = 0.0              # geglättete Zeit pro Bild (für die FPS-Anzeige)
     last_frame_t = time.perf_counter()
-
-    def select(idx: int, huefte_x: float, huefte_y: float, how: str) -> None:
-        nonlocal selected_person, selected_position, selected_reference
-        nonlocal calib_deadline, reset_arm_since, position, zustand, last_zustand
-        nonlocal start_arms_since, start_sent, lost_since, lock, takeover_since
-        start_arms_since = None
-        start_sent = False
-        lost_since = None
-        lock = identity.PlayerLock()
-        takeover_since = None
-        lost_sender.send(False)
-        selected_person = idx
-        selected_position = (huefte_x, huefte_y)
-        selected_reference = tracker.load_reference()
-        # Nasen- und Körperhöhe werden nach dem Countdown neu gemessen
-        selected_reference["nose_y"] = None
-        selected_reference["body_height"] = None
-        calib_deadline = time.monotonic() + CALIB_DELAY_S
-        reset_arm_since = None
-        position, zustand, last_zustand = "MITTE", "STEHT", "STEHT"
-        lane_sender.reset()
-        print(f"Spieler {idx} {how} ausgewählt – Kalibrierung in {CALIB_DELAY_S:.0f} s")
-
-    def deselect(reason: str) -> None:
-        nonlocal selected_person, selected_position, selected_reference, reset_arm_since
-        nonlocal lost_since
-        selected_person = None
-        selected_position = None
-        selected_reference = None
-        reset_arm_since = None
-        lost_since = None
-        lost_sender.send(False)
-        print(f"{reason} – zurück in Auswahlmodus")
 
     try:
         while True:
@@ -285,128 +479,59 @@ def main() -> None:
             persons = tracker.extract_persons(results)
             now = time.monotonic()
 
-            if selected_position is None:
-                # ── Auswahlmodus ─────────────────────────────────────────────
-                tracker.draw_person_indices(annotated, persons)
-                tracker.draw_selection_prompt(annotated, h, persons)
-                key = show(annotated)
-                if key == ord('q') or key == 27:
-                    break
+            # Farbprofile höchstens einmal pro Person und Bild berechnen
+            sig_cache = {}
 
-                # Tastenauswahl (0-9)
-                selected = tracker.select_person_by_key(key, persons)
-                if selected is not None:
-                    select(selected[0], selected[2], selected[3], "per Taste")
-                    continue
+            def sig_of(kpts):
+                if id(kpts) not in sig_cache:
+                    sig_cache[id(kpts)] = identity.appearance(frame, kpts)
+                return sig_cache[id(kpts)]
 
-                # Auswahl per Armheben (linkes Handgelenk laut YOLO)
-                for idx, person_kpts, huefte_x, huefte_y in persons:
-                    if tracker.wrist_raised(person_kpts, "left"):
-                        select(idx, huefte_x, huefte_y, "per Armheben")
-                        break
-                continue
+            # ── Ausgewählte Spieler verfolgen ────────────────────────────────
+            # Zuerst die gerade sichtbaren – ein verlorener Spieler darf nicht die
+            # Person übernehmen, die ein anderer Platz schon verfolgt.
+            claimed = set()
+            for slot in sorted((s for s in slots if s.selected), key=lambda s: s.lost_since is not None):
+                avail = [p for p in persons if id(p[1]) not in claimed]
+                kpts = slot.track(frame, avail, persons, now, annotated, h, w, sig_of)
+                if kpts is not None:
+                    claimed.add(id(kpts))
 
-            # ── Tracking-Modus ───────────────────────────────────────────────
-            # Gesucht wird um die letzte bekannte Position. Ist das Aussehen des
-            # Spielers gelernt, zählt nach einem längeren Aussetzer nur noch die
-            # Wiedererkennung – eine andere Person übernimmt NICHT einfach die
-            # Steuerung. Die Kalibrierung bleibt dabei erhalten.
-            body_h = selected_reference.get("body_height")
-            max_dist = body_h * TRACK_MAX_DIST_FRACTION if body_h else TRACK_MAX_DIST_FALLBACK
-            lost_for = None if lost_since is None else now - lost_since
-            if lock.identity.ready:
-                best_person = lock.find(frame, persons, selected_position, max_dist, lost_for)
-                identity.draw_similarities(annotated, persons, lock.sims)
-            else:
-                if lost_for is not None:
-                    max_dist += TRACK_REGAIN_PX_PER_S * lost_for
-                best_person = tracker.find_best_person(persons, selected_position, max_dist) if persons else None
-            calibrated = selected_reference.get("nose_y") is not None
+            # Start-Geste erst senden, wenn alle Spieler ausgewählt und kalibriert sind
+            if all(s.calibrated for s in slots):
+                for s in slots:
+                    if s.start_ready and not s.start_sent:
+                        s.send_start()
 
-            if best_person is None:
-                if lost_since is None:
-                    lost_since = now
-                    print("Spieler verloren – warte, bis er wiedererkannt wird (Kalibrierung bleibt erhalten)")
-                lost_for = now - lost_since
-                # Spiel anhalten, bis der Spieler wieder da ist (erst nach der Kalibrierung)
-                lost_sender.send(calibrated and lost_for >= LOST_PAUSE_S)
-                reset_arm_since = None
-                start_arms_since = None
+            # ── Freie Plätze: Auswahl per Armheben (linkes Handgelenk laut YOLO) ─
+            # Im 2-Spieler-Modus in der Bildhälfte des Platzes. Wer wie ein gerade
+            # verlorener Spieler aussieht, wird nicht neu vergeben.
+            lost_slots = [s for s in slots if s.selected and s.lost_since is not None
+                          and s.lock.identity.ready]
 
-                # Lange weg → eine andere Person darf mit dem linken Arm übernehmen
-                takeover = lost_for >= TAKEOVER_AFTER_S
-                tracker.draw_player_lost(annotated, h, lost_for, TAKEOVER_HOLD_S if takeover else None)
-                raiser = next((p for p in persons if tracker.wrist_raised(p[1], "left")), None) if takeover else None
-                if raiser is None:
-                    takeover_since = None
-                elif takeover_since is None:
-                    takeover_since = now
-                elif now - takeover_since >= TAKEOVER_HOLD_S:
-                    select(raiser[0], raiser[2], raiser[3], "per Übernahme (linker Arm)")
-            else:
-                if lost_since is not None:
-                    print(f"Spieler nach {now - lost_since:.1f} s wiedererkannt")
-                    lost_since = None
-                    takeover_since = None
-                lost_sender.send(False)
-                person_kpts, huefte_x, huefte_y = best_person
-                selected_position = (huefte_x, huefte_y)
+            def looks_like_lost(p):
+                return any((s.lock.identity.similarity(sig_of(p[1])) or 0.0) >= identity.SIM_ACCEPT
+                           for s in lost_slots)
 
-                # Aussehen lernen (v.a. während des Countdowns) – nicht, solange
-                # sich jemand mit dem Spieler überdeckt, sonst mischen sich die Farben
-                if not lock.identity.complete and not identity.overlaps_other(person_kpts, persons):
-                    lock.identity.learn(identity.appearance(frame, person_kpts))
+            free = [s for s in slots if not s.selected]
+            candidates = [p for p in persons if id(p[1]) not in claimed and not looks_like_lost(p)] if free else []
+            for p in candidates:
+                slot = next((s for s in free if s.in_zone(p[2], w)), None)
+                if slot is not None and tracker.wrist_raised(p[1], "left"):
+                    slot.select(p[0], p[2], p[3], "per Armheben", now)
+                    free.remove(slot)
+                    claimed.add(id(p[1]))
+            candidates = [p for p in candidates if id(p[1]) not in claimed]
 
-                if not calibrated:
-                    # Countdown, damit der Spieler Zeit hat, sich in Spielposition zu stellen
-                    remaining = calib_deadline - now
-                    if remaining > 0:
-                        tracker.draw_countdown(annotated, remaining, h, w)
-                    elif tracker.visible(person_kpts[0]):
-                        # Nur im Speicher – wird bei jeder Auswahl neu gemessen,
-                        # daher nicht mehr in player_references.json geschrieben
-                        selected_reference["nose_y"] = float(person_kpts[0][1])
-                        measured_h, quelle = tracker.measure_body_height(person_kpts)
-                        selected_reference["body_height"] = measured_h
-                        bh_txt = f"{measured_h:.1f} ({quelle})" if measured_h else f"n/a ({quelle}) → Pixel-Fallback"
-                        print(f"Kalibriert: nose_y={selected_reference['nose_y']:.1f}, body_height={bh_txt}")
-                else:
-                    position, zustand = tracker.analyze_person(
-                        person_kpts, h, w, client, lane_sender, selected_reference, last_zustand)
-                    last_zustand = zustand
-                tracker.draw_player_status(annotated, huefte_x, huefte_y, position, zustand)
-
-                ref_h = selected_reference.get("body_height")
-                left_up = tracker.wrist_raised(person_kpts, "left", ref_h)
-                right_up = tracker.wrist_raised(person_kpts, "right", ref_h)
-                calibrated = selected_reference.get("nose_y") is not None
-
-                # Start: beide Arme START_HOLD_S oben (erst nach der Kalibrierung).
-                # Danach müssen die Arme erst wieder runter, bevor erneut gesendet wird.
-                if calibrated and left_up and right_up:
-                    if start_arms_since is None:
-                        start_arms_since = now
-                    elif not start_sent and now - start_arms_since >= START_HOLD_S:
-                        client.send_message("/game/vision/start", [])
-                        print("/game/vision/start")
-                        start_sent = True
-                else:
-                    start_arms_since = None
-                    start_sent = False
-
-                # Reset nur durch den Spieler selbst und nur, wenn NUR der rechte Arm
-                # RESET_HOLD_S oben bleibt – kurzes Armhochreißen beim Sprung und die
-                # Start-Geste (beide Arme) zählen nicht.
-                if right_up and not left_up:
-                    if reset_arm_since is None:
-                        reset_arm_since = now
-                    elif now - reset_arm_since >= RESET_HOLD_S:
-                        deselect("Armheben erkannt")
-                else:
-                    reset_arm_since = None
-
-            tracker.draw_tracking_help(annotated, h)
-            tracker.draw_selected_player(annotated, selected_person, h)
+            # ── Anzeige ───────────────────────────────────────────────────────
+            two = len(slots) > 1
+            tracker.draw_zones(annotated, [s.zone for s in slots], [s.label for s in slots],
+                               [s.color for s in slots])
+            if free:
+                tracker.draw_person_indices(annotated, candidates)
+                if not two:
+                    tracker.draw_selection_prompt(annotated, h, candidates)
+            tracker.draw_tracking_help(annotated, h, "R = Auswahlmodus | M = 1/2 Spieler | Q = Beenden")
 
             num = len(results[0].boxes) if results[0].boxes is not None else 0
             cv2.putText(
@@ -414,16 +539,45 @@ def main() -> None:
                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
                 0.8, (0, 255, 0), 2
             )
+            if not two:
+                tracker.draw_selected_player(annotated, slots[0].person_idx if slots[0].selected else None, h)
+            else:
+                for i, s in enumerate(slots):
+                    side = "linken" if i == 0 else "rechten"
+                    if not s.selected:
+                        text = f"{s.label}: frei - linken Arm in der {side} Bildhaelfte heben"
+                    elif s.lost_since is not None:
+                        text = f"{s.label}: verloren - warte auf dieselbe Person"
+                    elif not s.calibrated:
+                        text = f"{s.label}: Spieler {s.person_idx} - Kalibrierung"
+                    else:
+                        text = f"{s.label}: Spieler {s.person_idx} bereit"
+                    cv2.putText(annotated, text, (10, 60 + 30 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.8, s.color, 2)
 
             key = show(annotated)
             if key == ord('q') or key == 27:
                 break
-            if key == ord('r') and selected_position is not None:
-                deselect("Taste r")
+            if key == ord('r'):
+                for s in slots:
+                    if s.selected:
+                        s.deselect("Taste r")
+            elif key == ord('m'):
+                for s in slots:
+                    if s.selected:
+                        s.deselect("Modus gewechselt")
+                slots = _make_slots(1 if two else 2, client)
+                print(_mode_hint(len(slots)))
+            elif free:
+                # Tastenauswahl (0-9): in den Platz der Bildhälfte, sonst den ersten freien
+                selected = tracker.select_person_by_key(key, candidates)
+                if selected is not None:
+                    slot = next((s for s in free if s.in_zone(selected[2], w)), free[0])
+                    slot.select(selected[0], selected[2], selected[3], "per Taste", now)
     except KeyboardInterrupt:
         pass
     finally:
-        lost_sender.send(False)   # Spiel nicht angehalten zurücklassen
+        for s in slots:
+            s.lost_sender.send(False)   # Spiel nicht angehalten zurücklassen
         reader.release()
         cv2.destroyAllWindows()
 

@@ -1,4 +1,5 @@
 from constants import INITIAL_SPD, MAX_LIVES
+from powerups import PowerState
 
 
 class GS:
@@ -18,6 +19,7 @@ class GS:
     paused     = True    # startet pausiert bis Match gestartet wird
     obs_dist   = 0.0     # zurückgelegte Strecke seit dem letzten Hindernis-Spawn
     coin_timer = 0.0
+    powerups   = True    # Power-ups im laufenden Match erlaubt (Menü, Taste U)
 
     @classmethod
     def reset(cls):
@@ -42,6 +44,7 @@ class PlayerState:
         self.inv_timer = 0.0    # Unverwundbarkeits-Timer
         self.shake_t   = 0.0    # Kamera-Shake-Timer
         self.alive     = True   # False → Spieler hat Game-Over (Figur friert ein)
+        self.powers    = PowerState()
 
     def is_invincible(self) -> bool:
         return self.inv_timer > 0

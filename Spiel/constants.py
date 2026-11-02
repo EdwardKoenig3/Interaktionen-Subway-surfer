@@ -65,7 +65,11 @@ COIN_CLEARANCE = 0.4  # Mindestabstand einer Münze zur Kollisionsbox eines Hind
 # Spieler-Boden max = 0.75 + 1.868 - 0.48 = 2.14 < Zug-Top 2.2  ✓
 JUMP_VEL      = 8.2
 GRAVITY       = -18.0
-SLIDE_DUR     = 1.5
+SLIDE_DUR     = 1.5     # Mindestdauer eines Slides
+# Ducken per Kamera: Die Figur rutscht, solange der Spieler unten bleibt (der
+# Tracker meldet das laufend). Bleibt die Meldung so lange aus (z.B. verlorenes
+# Paket), endet das Halten von selbst.
+SLIDE_HOLD_REFRESH = 0.75
 FAST_DROP_VEL = 15.0    # Ducken in der Luft: sofort mit dieser Geschwindigkeit nach unten
 LANE_SPD      = 18.0
 PLAYER_BASE_Y = 0.75
@@ -85,6 +89,11 @@ TRAIN_SX   = 2.2
 TRAIN_SY   = 2.2
 TRAIN_Y    = 1.1
 TRAIN_TOP  = TRAIN_Y + TRAIN_SY * 0.5   # = 2.2  (Oberkante)
+
+# Rampe vor manchen Zügen: läuft man ohne Sprung aufs Dach hinauf
+RAMP_LEN      = 7.0    # Länge der Schräge (Steigung ≈ 17°)
+RAMP_CHANCE   = 0.4    # Anteil der Züge mit Rampe
+RAMP_STEP_MAX = 0.9    # nur bis zu dieser Höhe kann man seitlich auf die Rampe wechseln
 
 # Overhead-Hindernis: nur durch Sliden passierbar
 # Unterkante = OVERHEAD_Y - OVERHEAD_SY/2 = 2.0 - 1.2 = 0.8

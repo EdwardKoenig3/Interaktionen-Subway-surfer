@@ -9,6 +9,8 @@ Fenster im Vordergrund über dem Spiel.
     uv run start_einzel_pc.py                       # Kamera 0, Gerät automatisch
     uv run start_einzel_pc.py --camera 1            # externe Kamera
     uv run start_einzel_pc.py --voice               # zusätzlich Sprachsteuerung
+    uv run start_einzel_pc.py --spieler 2           # zwei Spieler vor der Kamera
+                                                    #   (im Spiel-Menü rechts VISION 2 wählen)
     uv run start_einzel_pc.py --device intel:cpu    # weitere Optionen gehen an CvMain.py
 
 Schließt man das Spiel, wird alles beendet.

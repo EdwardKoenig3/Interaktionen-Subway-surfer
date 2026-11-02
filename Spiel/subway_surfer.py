@@ -16,17 +16,22 @@ Dateistruktur:
     coins.py        – Coin – geteilt
     world.py        – GroundTile, make_buildings – geteilt
     hud.py          – PlayerHud (pro Spieler)
-    menu.py         – StartMenu (1/2 Spieler, Steuerquelle)
-    osc_input.py    – OSC (/game/vision/*, /game/voice/*)
+    menu.py         – StartMenu (1/2 Spieler, Steuerquelle, Power-ups)
+    powerups.py     – Power-ups (Schild, Gleiten, Magnet) mit Abklingzeit
+    osc_input.py    – OSC (/game/vision/*, /game/vision2/*, /game/voice/*)
     subway_surfer.py– App, Spawn, Kollision, Update, Input
 
 Steuerung wird beim Start gewählt:
     TASTATUR  – Spieler 1 A/D/W/S, Spieler 2 Pfeiltasten (Einzelspieler: beides)
-    VISION    – OSC /game/vision/{left,center,right,jump,slide,stand}
+                Power-ups: Q/E/F (Spieler 1) bzw. J/K/L (Spieler 2)
+    VISION    – OSC /game/vision/{left,center,right,jump,slide,stand,power}
+    VISION 2  – OSC /game/vision2/… (zweiter Spieler vor derselben Kamera)
     VOICE     – OSC /game/voice/{left,center,right,jump,slide,stand}
 
 Meldet die Kamera /game/vision/lost 1 (Spieler nicht erkannt), hält das Spiel an,
 bis er wieder vor der Kamera steht.
+
+Manche Züge haben vorne eine Rampe – darüber läuft man ohne Sprung aufs Dach.
 """
 
 import random, sys, math
@@ -42,9 +47,10 @@ from constants import (
     TILE_LEN, TILE_COUNT,
     SPEED_INC, MAX_SPD, JUMP_VEL, GRAVITY,
     PLAYER_BASE_Y, PLAYER_SY,
-    TRAIN_TOP,
+    TRAIN_TOP, RAMP_CHANCE,
     INVINCIBLE, COIN_SCORE, COIN_CLEARANCE,
 )
+from powerups    import MAGNET_RANGE_Z
 from game_state  import GS, PlayerState
 from player      import Player
 from obstacles   import Obstacle, TRAIN_LENGTHS
@@ -100,8 +106,19 @@ class Side:
         self.state  = state
         self.player = player
         self.hud    = hud
-        self.src    = src      # 'keyboard' | 'vision' | 'voice'
+        self.src    = src      # 'keyboard' | 'vision' | 'vision2' | 'voice'
         self.side   = side     # 'left' | 'right' | 'single'
+
+
+# Steuerquellen, die per OSC kommen (Kamera-Spieler 1/2, Sprache)
+OSC_SOURCES = ('vision', 'vision2', 'voice')
+
+# Power-up-Tasten (Tastatur-Spieler): links/Einzelspieler Q/E/F, rechts J/K/L
+_POWER_KEYS = {
+    'left':  {'q': 'shield', 'e': 'glide', 'f': 'magnet'},
+    'right': {'j': 'shield', 'k': 'glide', 'l': 'magnet'},
+}
+_POWER_KEYS['single'] = {**_POWER_KEYS['left'], **_POWER_KEYS['right']}
 
 
 # ── Globale Listen / Zustand ──────────────────────────────────────────
@@ -199,9 +216,13 @@ def _spawn_obstacle() -> bool:
         lane = _draw_lane(used)
         if lane is None:
             break
-        o = Obstacle(lane, _pick_kind(lane))
+        kind = _pick_kind(lane)
+        ramp = kind.startswith('train') and random.random() < RAMP_CHANCE
+        o = Obstacle(lane, kind, ramp=ramp)
         obstacles.append(o)
         _remove_coins_inside(o)
+        if ramp and random.random() < 0.7:
+            _spawn_ramp_coins(o)
         used.add(lane)
     return bool(used)
 
@@ -211,9 +232,22 @@ def _spawn_obstacle() -> bool:
 # Hindernis sind sie erlaubt – z.B. ein Münzbogen über ein Auto.
 
 def _inside_obstacle(o: Obstacle, lane: int, z: float, y: float) -> bool:
-    return (not o._dead and o.lane == lane
-            and abs(o.z - z) < o.hz + COIN_CLEARANCE
-            and abs(o.y - y) < o.hh + COIN_CLEARANCE)
+    if o._dead or o.lane != lane:
+        return False
+    return ((abs(o.z - z) < o.hz + COIN_CLEARANCE and abs(o.y - y) < o.hh + COIN_CLEARANCE)
+            or o.ramp_contains(z, y, COIN_CLEARANCE))
+
+
+def _spawn_ramp_coins(o: Obstacle):
+    """Münzspur die Rampe hinauf und ein Stück übers Dach – zeigt den neuen Weg."""
+    start = o.front_z - o.ramp_len
+    spots = [start + (i + 0.5) * o.ramp_len / 4 for i in range(4)]
+    spots += [o.front_z + 1.0 + i * 1.8 for i in range(min(5, int(o.hz * 2 / 1.8)))]
+    for z in spots:
+        surface = o.ramp_surface(z)
+        y = (o.roof_y if surface is None else surface) + 0.5
+        if not any(_inside_obstacle(p, o.lane, z, y) for p in obstacles if p is not o):
+            coins.append(Coin(o.lane, z, y=y))
 
 
 def _coin_blocked(lane: int, z: float, y: float) -> bool:
@@ -290,12 +324,19 @@ def _check_collisions(side: Side) -> bool:
     if not state.is_invincible():
         hit = False
         for o in obstacles:
-            if o._dead:
+            # Auf der Rampe eines Zugs läuft man über ihn hinweg, nicht hinein
+            if o._dead or o is player.ramp:
                 continue
             if o.hits_body(player):
                 hit = True
                 break
-        if hit:
+        if hit and state.powers.is_active('shield'):
+            # Schild fängt den Treffer ab: kein Leben weg, kurz unverwundbar
+            # (lange genug, um durch das Hindernis hindurchzukommen)
+            state.powers.end('shield')
+            state.inv_timer = INVINCIBLE
+            side.hud.notify('SCHILD HÄLT!', color.cyan)
+        elif hit:
             state.lives    -= 1
             state.inv_timer = INVINCIBLE
             side.hud.update(state)
@@ -313,6 +354,21 @@ def _check_collisions(side: Side) -> bool:
             state.coins += 1
             destroy(c)
     return False
+
+
+def _pull_coins(player: Player, dt: float):
+    """Magnet: Münzen voraus fliegen zum Spieler – genau so schnell, dass sie
+    bei ihm ankommen, wenn sie seine Höhe (z) erreichen; dort sammelt er sie ein."""
+    for c in coins:
+        if c._dead:
+            continue
+        ahead = c.z - player.z
+        if not -0.5 < ahead < MAGNET_RANGE_Z:
+            continue
+        t_left = max(ahead / max(GS.speed, 1e-3), dt)    # Zeit bis zum Spieler
+        f = min(1.0, dt / t_left)
+        c.x += (player.x - c.x) * f
+        c.y += (player.y - c.y) * f
 
 
 # ── Game Over / Menü ──────────────────────────────────────────────────
@@ -414,7 +470,7 @@ def _hide_overlays():
 
 
 def _osc_sources() -> set[str]:
-    return {s.src for s in sides if s.src in ('vision', 'voice')}
+    return {s.src for s in sides if s.src in OSC_SOURCES}
 
 
 def _apply_pause():
@@ -465,8 +521,9 @@ def _start_match(cfg: dict):
     _teardown_match()
 
     GS.reset()
-    GS.running = True
-    GS.paused  = False
+    GS.running  = True
+    GS.paused   = False
+    GS.powerups = cfg.get('powerups', True)
     manual_pause = tracking_hold = False
     _lane_bag.clear()
     clear_actions()
@@ -475,24 +532,25 @@ def _start_match(cfg: dict):
     camera.position   = (0, CAM_Y, CAM_Z_BASE)
     camera.rotation_x = CAM_ROT_X
 
+    pw = GS.powerups
     if cfg['mode'] == 2:
         st_l = PlayerState()
         pl_l = Player(st_l, x_offset=P1_OFFSET, marker_color=P1_COLOR)
         pl_l.obstacles_ref = obstacles
         sides.append(Side(st_l, pl_l,
-                          PlayerHud(x_center=-0.55, x_scale=0.6, accent=P1_COLOR, label='P1'),
+                          PlayerHud(x_center=-0.55, x_scale=0.6, accent=P1_COLOR, label='P1', powerups=pw),
                           src=cfg['sources'][0], side='left'))
         st_r = PlayerState()
         pl_r = Player(st_r, x_offset=P2_OFFSET, marker_color=P2_COLOR)
         pl_r.obstacles_ref = obstacles
         sides.append(Side(st_r, pl_r,
-                          PlayerHud(x_center=0.55, x_scale=0.6, accent=P2_COLOR, label='P2'),
+                          PlayerHud(x_center=0.55, x_scale=0.6, accent=P2_COLOR, label='P2', powerups=pw),
                           src=cfg['sources'][1], side='right'))
     else:
         st = PlayerState()
         pl = Player(st, x_offset=0.0, marker_color=None)
         pl.obstacles_ref = obstacles
-        sides.append(Side(st, pl, PlayerHud(x_center=0.0, x_scale=1.0),
+        sides.append(Side(st, pl, PlayerHud(x_center=0.0, x_scale=1.0, powerups=pw),
                           src=cfg['sources'][0], side='single'))
 
     for side in sides:
@@ -574,8 +632,12 @@ def update():
                 st.score = int(GS.elapsed * GS.speed * 2) + st.coins * COIN_SCORE
                 if st.inv_timer > 0: st.inv_timer = max(0.0, st.inv_timer - dt)
                 if st.shake_t  > 0: st.shake_t   = max(0.0, st.shake_t   - dt)
-                if side.src in ('vision', 'voice'):
-                    poll_actions(side.player, side.src)
+                st.powers.update(dt)
+                if side.src in OSC_SOURCES:
+                    for name, ok in poll_actions(side.player, side.src):
+                        side.hud.notify_power(name, ok, st)
+                if st.powers.is_active('magnet'):
+                    _pull_coins(side.player, dt)
             if _check_collisions(side):
                 died.append(side)
             side.hud.update(st)
@@ -603,6 +665,11 @@ def update():
 
 def _handle_keyboard(side: Side, key):
     p = side.player
+    power = _POWER_KEYS[side.side].get(key)
+    if power is not None:
+        if GS.powerups:
+            side.hud.notify_power(power, p.activate_power(power), side.state)
+        return
     if side.side == 'right':           # nur Pfeiltasten
         if   key == 'left arrow':       p.action_left()
         elif key == 'right arrow':      p.action_right()

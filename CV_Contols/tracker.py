@@ -142,15 +142,16 @@ def draw_person_indices(annotated: Any, persons: List[TrackedPerson]) -> None:
         )
 
 
-def draw_selection_prompt(annotated: Any, h: int, persons: List[TrackedPerson]) -> None:
+def draw_selection_prompt(annotated: Any, h: int, persons: List[TrackedPerson], line: int = 0) -> None:
+    # cv2.putText kann keine Umlaute darstellen
     if persons:
-        text = f"Wähle Spieler 0-{len(persons) - 1} mit Taste"
+        text = f"Linken Arm heben oder Taste 0-{len(persons) - 1}: mitspielen"
     else:
         text = "Keine Spieler erkannt. Warte auf Personen..."
     cv2.putText(
         annotated,
         text,
-        (10, h - 20),
+        (10, h - 20 - 30 * line),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.8,
         (0, 255, 255),
@@ -190,22 +191,20 @@ def find_best_person(persons: List[TrackedPerson], selected_position: Tuple[floa
     return best_person
 
 
-_LANE_ADDR = {
-    "LINKS":  "/game/vision/left",
-    "MITTE":  "/game/vision/center",
-    "RECHTS": "/game/vision/right",
-}
+_LANE_NAME = {"LINKS": "left", "MITTE": "center", "RECHTS": "right"}
 
 
 class LaneSender:
     """Sendet die Spur bei Änderung sofort, sonst alle `repeat_s` Sekunden erneut.
 
     Die Wiederholung hält das Spiel nach Pausen o.ä. synchron, ohne wie früher
-    in jedem Frame zu senden und zu printen.
+    in jedem Frame zu senden und zu printen. `prefix` ist der OSC-Namespace des
+    Spielers (/game/vision, beim zweiten Kamera-Spieler /game/vision2).
     """
 
-    def __init__(self, client: SimpleUDPClient, repeat_s: float = 0.25):
+    def __init__(self, client: SimpleUDPClient, prefix: str = "/game/vision", repeat_s: float = 0.25):
         self.client = client
+        self.prefix = prefix
         self.repeat_s = repeat_s
         self._last: Optional[str] = None
         self._last_t = 0.0
@@ -214,7 +213,7 @@ class LaneSender:
         now = time.monotonic()
         changed = target != self._last
         if changed or now - self._last_t >= self.repeat_s:
-            addr = _LANE_ADDR[target]
+            addr = f"{self.prefix}/{_LANE_NAME[target]}"
             self.client.send_message(addr, [])
             if changed:
                 print(addr)
@@ -225,16 +224,48 @@ class LaneSender:
         self._last = None
 
 
+class ActionSender:
+    """Meldet Sprung und Ducken: jump einmal, slide beim Abtauchen und danach alle
+    `repeat_s` Sekunden erneut, solange der Spieler unten bleibt, stand beim
+    Aufstehen. Das Spiel lässt die Figur so lange rutschen (mindestens 1,5 s) –
+    geht ein stand verloren, endet das Rutschen dort trotzdem kurz darauf.
+    """
+
+    _ADDR = {"JUMP": "jump", "SLIDE": "slide", "STEHT": "stand"}
+
+    def __init__(self, client: SimpleUDPClient, prefix: str = "/game/vision", repeat_s: float = 0.25):
+        self.client = client
+        self.prefix = prefix
+        self.repeat_s = repeat_s
+        self._state = "STEHT"
+        self._last_t = 0.0
+
+    def update(self, zustand: str) -> None:
+        now = time.monotonic()
+        if zustand != self._state:
+            addr = f"{self.prefix}/{self._ADDR[zustand]}"
+            self.client.send_message(addr, [])
+            print(addr)
+            self._state, self._last_t = zustand, now
+        elif zustand == "SLIDE" and now - self._last_t >= self.repeat_s:
+            self.client.send_message(f"{self.prefix}/slide", [])
+            self._last_t = now
+
+    def reset(self) -> None:
+        self._state = "STEHT"
+
+
 class LostSender:
-    """Meldet dem Spiel, ob der Spieler gerade nicht erkannt wird (/game/vision/lost 1|0).
+    """Meldet dem Spiel, ob der Spieler gerade nicht erkannt wird (<prefix>/lost 1|0).
 
     Das Spiel hält an, solange die Meldung „verloren" frisch ist – deshalb wird
     sie alle `repeat_s` Sekunden wiederholt. Stürzt das Tracking ab, läuft das
     Spiel nach kurzer Zeit von selbst weiter, statt ewig zu warten.
     """
 
-    def __init__(self, client: SimpleUDPClient, repeat_s: float = 0.5):
+    def __init__(self, client: SimpleUDPClient, prefix: str = "/game/vision", repeat_s: float = 0.5):
         self.client = client
+        self.prefix = prefix
         self.repeat_s = repeat_s
         self._lost = False
         self._last_t = 0.0
@@ -243,14 +274,21 @@ class LostSender:
         now = time.monotonic()
         changed = lost != self._lost
         if changed or (lost and now - self._last_t >= self.repeat_s):
-            self.client.send_message("/game/vision/lost", [1 if lost else 0])
+            self.client.send_message(f"{self.prefix}/lost", [1 if lost else 0])
             if changed:
-                print(f"/game/vision/lost {1 if lost else 0}")
+                print(f"{self.prefix}/lost {1 if lost else 0}")
             self._lost = lost
             self._last_t = now
 
 
-def analyze_person(person_kpts: Any, h: int, w: int, client: SimpleUDPClient, lane_sender: LaneSender, reference: Optional[Dict[str, float]] = None, last_zustand: str = "STEHT") -> Tuple[str, str]:
+def analyze_person(person_kpts: Any, w: int, lane_sender: LaneSender, action_sender: ActionSender,
+                   reference: Optional[Dict[str, float]] = None, last_zustand: str = "STEHT",
+                   zone: Tuple[float, float] = (0.0, 1.0)) -> Tuple[str, str]:
+    """Spur, Sprung und Ducken eines Spielers bestimmen und ans Spiel melden.
+
+    `zone` ist sein Bildbereich als Anteil der Breite: (0, 1) = ganzes Bild,
+    im 2-Spieler-Modus die linke oder rechte Hälfte – dort liegen seine 3 Spuren.
+    """
     reference = reference or get_default_reference()
     left_ratio = reference.get("left_ratio", 1/3)
     right_ratio = reference.get("right_ratio", 2/3)
@@ -264,9 +302,10 @@ def analyze_person(person_kpts: Any, h: int, w: int, client: SimpleUDPClient, la
         x = float(nase[0])
     else:
         x = float((person_kpts[11][0] + person_kpts[12][0]) / 2)
-    if x < w * left_ratio:
+    x0, zone_w = w * zone[0], w * (zone[1] - zone[0])
+    if x < x0 + zone_w * left_ratio:
         target = "LINKS"
-    elif x < w * right_ratio:
+    elif x < x0 + zone_w * right_ratio:
         target = "MITTE"
     else:
         target = "RECHTS"
@@ -276,6 +315,7 @@ def analyze_person(person_kpts: Any, h: int, w: int, client: SimpleUDPClient, la
     # Zustand beibehalten (sonst würde danach dieselbe Geste erneut ausgelöst)
     reference_nose_y = reference.get("nose_y")
     if not nase_sichtbar or reference_nose_y is None:
+        action_sender.update(last_zustand)
         return target, last_zustand
 
     nose_y_current = float(nase[1])
@@ -299,43 +339,54 @@ def analyze_person(person_kpts: Any, h: int, w: int, client: SimpleUDPClient, la
     else:
         zustand = "STEHT"
 
-    # Nachricht nur senden, wenn Zustand sich ändert
-    if zustand != last_zustand:
-        if zustand == "JUMP":
-            client.send_message("/game/vision/jump", [])
-            print("/game/vision/jump")
-        elif zustand == "SLIDE":
-            client.send_message("/game/vision/slide", [])
-            print("/game/vision/slide")
-        else:
-            print("/game/vision/stand")
-
+    # jump/slide/stand bei Änderung, slide wiederholt, solange geduckt
+    action_sender.update(zustand)
     return target, zustand
 
 
-def draw_player_status(annotated: Any, huefte_x: float, huefte_y: float, position: str, zustand: str) -> None:
-    text = f"{position} | {zustand}"
+def draw_player_status(annotated: Any, huefte_x: float, huefte_y: float, position: str, zustand: str,
+                       label: str = "", color: Tuple[int, int, int] = (0, 255, 255)) -> None:
+    text = f"{label + ' ' if label else ''}{position} | {zustand}"
     cv2.putText(
         annotated,
         text,
         (int(huefte_x) - 80, int(huefte_y) - 20),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.7,
-        (0, 255, 255),
+        color,
         2,
     )
 
 
-def draw_tracking_help(annotated: Any, h: int) -> None:
+def draw_tracking_help(annotated: Any, h: int, text: str = "R = Auswahlmodus | Q = Beenden") -> None:
     cv2.putText(
         annotated,
-        "R = Auswahlmodus | Q = Beenden",
+        text,
         (10, h - 40),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.7,
         (0, 255, 255),
         2,
     )
+
+
+def draw_zones(annotated: Any, zones: List[Tuple[float, float]], labels: List[str],
+               colors: List[Tuple[int, int, int]], reference: Optional[Dict[str, float]] = None) -> None:
+    """Spurgrenzen jeder Zone als dünne Linien, im 2-Spieler-Modus dazu die
+    Trennlinie zwischen den Bildhälften und P1/P2 oben in der jeweiligen Farbe."""
+    h, w = annotated.shape[:2]
+    reference = reference or DEFAULT_REFERENCE
+    for (z0, z1), label, col in zip(zones, labels, colors):
+        x0, zw = w * z0, w * (z1 - z0)
+        for ratio in (reference.get("left_ratio", 1/3), reference.get("right_ratio", 2/3)):
+            x = int(x0 + zw * ratio)
+            cv2.line(annotated, (x, h // 3), (x, h), (120, 120, 120), 1)
+        if label:
+            cv2.putText(annotated, label, (int(x0 + zw / 2) - 20, 100),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, col, 3)
+    if len(zones) > 1:
+        for z0, _ in zones[1:]:
+            cv2.line(annotated, (int(w * z0), 0), (int(w * z0), h), (255, 255, 255), 2)
 
 
 def draw_selected_player(annotated: Any, selected_person: Optional[int], h: int) -> None:
@@ -352,13 +403,16 @@ def draw_selected_player(annotated: Any, selected_person: Optional[int], h: int)
 
 
 def draw_player_lost(annotated: Any, h: int, lost_for: float,
-                     takeover_hold_s: Optional[float] = None) -> None:
-    """Hinweis „Spieler verloren"; mit `takeover_hold_s` zusätzlich, wie ein neuer Spieler übernimmt."""
+                     takeover_hold_s: Optional[float] = None, label: str = "", line: int = 0) -> None:
+    """Hinweis „Spieler verloren"; mit `takeover_hold_s` zusätzlich, wie ein neuer Spieler übernimmt.
+    `line` schiebt die Zeilen nach oben (zweiter Spieler)."""
     # Hinweis: cv2.putText kann keine Umlaute darstellen
+    who = label or "Spieler"
+    y = h - 20 - 100 * line
     cv2.putText(
         annotated,
-        f"Spieler verloren ({lost_for:.0f} s) - warte auf dieselbe Person ... (R = Auswahlmodus)",
-        (10, h - 20),
+        f"{who} verloren ({lost_for:.0f} s) - warte auf dieselbe Person ... (R = Auswahlmodus)",
+        (10, y),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.8,
         (0, 0, 255),
@@ -367,8 +421,8 @@ def draw_player_lost(annotated: Any, h: int, lost_for: float,
     if takeover_hold_s is not None:
         cv2.putText(
             annotated,
-            f"Neuer Spieler? Linken Arm {takeover_hold_s:.0f} s oben halten",
-            (10, h - 70),
+            f"Neuer Spieler{' fuer ' + label if label else ''}? Linken Arm {takeover_hold_s:.0f} s oben halten",
+            (10, y - 50),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.8,
             (0, 165, 255),
@@ -388,12 +442,14 @@ def draw_perf(annotated: Any, w: int, fps: float, infer_ms: float, device: str) 
     )
 
 
-def draw_countdown(annotated: Any, remaining: float, h: int, w: int) -> None:
-    """Countdown vor der Kalibrierung groß in die Bildmitte zeichnen."""
-    cv2.putText(annotated, "Gerade hinstellen!", (w // 2 - 220, h // 2 - 90),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.4, (0, 255, 255), 3)
-    cv2.putText(annotated, str(int(remaining) + 1), (w // 2 - 40, h // 2 + 60),
-                cv2.FONT_HERSHEY_SIMPLEX, 5.0, (0, 255, 255), 10)
+def draw_countdown(annotated: Any, remaining: float, h: int, w: int, cx: Optional[int] = None,
+                   color: Tuple[int, int, int] = (0, 255, 255)) -> None:
+    """Countdown vor der Kalibrierung groß zeichnen – in der Bildmitte oder bei `cx`."""
+    cx = w // 2 if cx is None else cx
+    cv2.putText(annotated, "Gerade hinstellen!", (cx - 220, h // 2 - 90),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.4, color, 3)
+    cv2.putText(annotated, str(int(remaining) + 1), (cx - 40, h // 2 + 60),
+                cv2.FONT_HERSHEY_SIMPLEX, 5.0, color, 10)
 
 
 # YOLO-Keypoint-Indizes: 5/6 = linke/rechte Schulter, 9/10 = linkes/rechtes Handgelenk.

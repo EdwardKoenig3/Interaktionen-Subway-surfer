@@ -510,6 +510,54 @@ def gen_pack_faces():
 
 # ── Alle generieren ───────────────────────────────────────────────────
 
+# ── Power-up-Symbole (16×16, transparent) ────────────────────────────
+
+PW_SHIELD   = (60,  170, 235)   # Schild blau
+PW_SHIELD_D = (24,  96,  160)
+PW_SHIELD_L = (170, 225, 255)
+PW_WING     = (240, 244, 250)   # Flügel weiß
+PW_WING_D   = (150, 170, 200)
+PW_MAG      = (210, 40,  40)    # Magnet rot
+PW_MAG_D    = (130, 20,  20)
+PW_STEEL    = (205, 210, 220)   # Magnetpole
+
+
+def _icon() -> tuple[Image.Image, ImageDraw.Draw]:
+    i = Image.new('RGBA', (16, 16), (0, 0, 0, 0))
+    return i, ImageDraw.Draw(i)
+
+
+def gen_power_icons():
+    # Schild: Wappenform mit hellem Rand und Glanzpunkt
+    i, d = _icon()
+    shape = [(2, 1), (13, 1), (13, 8), (11, 11), (8, 14), (7, 14), (4, 11), (2, 8)]
+    d.polygon(shape, fill=(*PW_SHIELD_D, 255))
+    d.polygon([(3, 2), (12, 2), (12, 8), (10, 10), (8, 12), (7, 12), (5, 10), (3, 8)],
+              fill=(*PW_SHIELD, 255))
+    block(d, 7, 3, 8, 10, PW_SHIELD_L)          # senkrechter Streifen
+    block(d, 4, 5, 11, 6, PW_SHIELD_L)          # waagrechter Streifen
+    px(d, 4, 3, (255, 255, 255))
+    save(i, 'pw_shield.png')
+
+    # Gleiten: Papierflieger (nach rechts oben), Knickfalte dunkler
+    i, d = _icon()
+    d.polygon([(1, 9), (15, 2), (7, 11)], fill=(*PW_WING, 255))      # obere Fläche
+    d.polygon([(7, 11), (15, 2), (9, 14)], fill=(*PW_WING_D, 255))   # untere Fläche
+    d.line([(7, 11), (15, 2)], fill=(*PW_SHIELD_D, 255))             # Falz
+    save(i, 'pw_glide.png')
+
+    # Magnet: rotes Hufeisen mit silbernen Polen
+    i, d = _icon()
+    block(d, 3, 2, 5, 11, PW_MAG)               # linker Schenkel
+    block(d, 10, 2, 12, 11, PW_MAG)             # rechter Schenkel
+    block(d, 3, 11, 12, 13, PW_MAG)             # Bogen unten
+    block(d, 5, 12, 10, 13, PW_MAG_D)
+    block(d, 3, 1, 5, 3, PW_STEEL)              # Pole
+    block(d, 10, 1, 12, 3, PW_STEEL)
+    px(d, 4, 5, (240, 120, 120))                # Glanz
+    save(i, 'pw_magnet.png')
+
+
 if __name__ == '__main__':
     print('Generiere Pixel-Art Texturen (16×16)...')
     gen_ground()
@@ -527,5 +575,6 @@ if __name__ == '__main__':
     gen_head_faces()
     gen_leg_faces()
     gen_pack_faces()
+    gen_power_icons()
     print(f'\nFertig! Alle Texturen in: {OUT}')
     print('Starte das Spiel – Nearest-Neighbour Filtering ist bereits in subway_surfer.py aktiv.')

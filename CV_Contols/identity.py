@@ -176,16 +176,18 @@ def overlaps_other(player_kpts: Any, persons: List[TrackedPerson]) -> bool:
                for _, kpts, hx, hy in persons)
 
 
-def draw_similarities(annotated: Any, persons: List[TrackedPerson], sims: List[Optional[float]]) -> None:
+def draw_similarities(annotated: Any, persons: List[TrackedPerson], sims: List[Optional[float]],
+                      label: str = "ID", row: int = 0) -> None:
     """Ähnlichkeit zum gelernten Spieler unter jede Person schreiben.
-    Grün = wird wiedererkannt, gelb = unsicher, rot = sicher jemand anderes."""
+    Grün = wird wiedererkannt, gelb = unsicher, rot = sicher jemand anderes.
+    `label`/`row`: bei zwei Spielern je eine Zeile ("P1 0.83", "P2 0.12")."""
     for (_, _, huefte_x, huefte_y), sim in zip(persons, sims):
         if sim is None:
-            text, col = "ID ?", (160, 160, 160)
+            text, col = f"{label} ?", (160, 160, 160)
         else:
-            text = f"ID {sim:.2f}"
+            text = f"{label} {sim:.2f}"
             col = (0, 220, 0) if sim >= SIM_ACCEPT else (0, 220, 255) if sim >= SIM_REJECT else (0, 0, 255)
-        cv2.putText(annotated, text, (int(huefte_x) - 45, int(huefte_y) + 35),
+        cv2.putText(annotated, text, (int(huefte_x) - 45, int(huefte_y) + 35 + 30 * row),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, col, 2)
 
 
@@ -244,13 +246,17 @@ class PlayerLock:
         self._confirm_pos: Optional[Tuple[float, float]] = None
 
     def find(self, frame: Any, persons: List[TrackedPerson], last_pos: Tuple[float, float],
-             max_dist: float, lost_for: Optional[float]) -> Optional[Tuple[Any, float, float]]:
+             max_dist: float, lost_for: Optional[float],
+             sigs: Optional[List[Signature]] = None) -> Optional[Tuple[Any, float, float]]:
         """Spieler (Keypoints, Hüfte x, Hüfte y) oder None.
 
         `lost_for`: None = im letzten Bild noch gefunden, sonst Sekunden seit dem Verlust.
+        `sigs`: schon berechnete Farbprofile der Personen (sonst werden sie hier berechnet).
         Erst benutzen, wenn `identity.ready` – vorher gibt es kein Profil.
         """
-        self.sims = [self.identity.similarity(appearance(frame, kpts)) for _, kpts, _, _ in persons]
+        if sigs is None:
+            sigs = [appearance(frame, kpts) for _, kpts, _, _ in persons]
+        self.sims = [self.identity.similarity(sig) for sig in sigs]
 
         if lost_for is None or lost_for < SHORT_GAP_S:
             self._confirm, self._confirm_pos = 0, None

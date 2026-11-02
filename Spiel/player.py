@@ -1,20 +1,23 @@
-from ursina import Entity, lerp, time
+from ursina import Entity, Color, lerp, time
 from constants import (
     LANES, LANE_COUNT,
-    JUMP_VEL, GRAVITY, SLIDE_DUR, FAST_DROP_VEL, LANE_SPD,
+    JUMP_VEL, GRAVITY, SLIDE_DUR, SLIDE_HOLD_REFRESH, FAST_DROP_VEL, LANE_SPD,
     PLAYER_BASE_Y, PLAYER_SY, PLAYER_HW, PLAYER_HH,
-    PUSHBACK_DUR, PUSHBACK_DIST,
+    PUSHBACK_DUR, PUSHBACK_DIST, RAMP_STEP_MAX,
 )
 from game_state import GS
+from powerups import POWERS, GLIDE_GRAVITY_UP, GLIDE_GRAVITY_DOWN
 
 
 class Player(Entity):
     """
-    Spielercharakter mit Sprung, Slide, Spurwechsel und Pushback.
+    Spielercharakter mit Sprung, Slide, Spurwechsel, Pushback, Rampen und Power-ups.
 
     Öffentliches Interface (Tastatur ODER Gestenmodul):
-        action_left()   action_right()
-        action_jump()   action_slide()
+        action_left()   action_right()   set_lane(n)
+        action_jump()   action_slide()   start_slide() / stop_slide()  (Taste)
+                                         hold_slide() / release_slide() (Kamera)
+        activate_power(name)
 
     Nach Erstellung muss obstacles_ref auf die globale Hindernisliste zeigen:
         player.obstacles_ref = obstacles
@@ -47,6 +50,10 @@ class Player(Entity):
         self._base_sy      = PLAYER_SY
         self._base_y       = PLAYER_BASE_Y
         self.platform      = None
+        self.ramp          = None    # Zug, dessen Rampe der Spieler gerade hochläuft
+        # Ducken per Kamera: verbleibende Zeit, bis das Halten ohne neue Meldung endet
+        # (None = kein Kamera-Halten, z.B. Taste gedrückt)
+        self._hold_left    = None
         self._pb_timer     = 0.0
         self.obstacles_ref = []
         self._planes       = []   # alle visuellen Quad-Entities
@@ -102,6 +109,18 @@ class Player(Entity):
                            unlit=True, double_sided=True, scale=1.3,
                            rotation=(90, 0, 0), position=(0, -0.72, 0))
 
+        # Power-up-Effekte: Schild-Blase, Flügel beim Gleiten, Magnet über dem Kopf
+        self.shield_fx = Entity(parent=self, model='sphere', color=Color(0.35, 0.85, 1.0, 0.3),
+                                unlit=True, double_sided=True, enabled=False)
+        self.wings_fx = [Entity(parent=self, model='quad', color=Color(0.95, 0.97, 1.0, 0.85),
+                                unlit=True, double_sided=True, enabled=False,
+                                position=(side * 1.0, 0.1, 0.05), rotation=(0, 0, side * -14),
+                                scale=(1.1, 0.3, 1))
+                         for side in (-1, 1)]
+        self.magnet_fx = Entity(parent=self, model='quad', texture=POWERS['magnet'].icon,
+                                billboard=True, unlit=True, enabled=False,
+                                position=(0, 0.95, 0), scale=(0.5 / 0.7, 0.5, 1))
+
     # ── Öffentliches Interface ────────────────────────────────────────
 
     def _lane_x(self, lane: int) -> float:
@@ -150,6 +169,7 @@ class Player(Entity):
         self.vel_y      = JUMP_VEL
         self.is_jumping = True
         self.platform   = None
+        self.ramp       = None
 
     def action_slide(self):
         """Einmaliger Slide (für OSC/Kamera): läuft nach SLIDE_DUR automatisch aus.
@@ -166,6 +186,7 @@ class Player(Entity):
         In der Luft: schnell nach unten fallen, Slide startet bei der Landung."""
         if self._pb_timer > 0:
             return
+        self._hold_left = None          # Taste hält, bis sie losgelassen wird
         if self.is_jumping:
             self._queue_slide(held=True)
         elif not self.is_sliding:
@@ -181,6 +202,40 @@ class Player(Entity):
         # Taste schon vor der Landung losgelassen → kein Slide mehr bei der Landung
         if self._slide_queued and self._slide_queued_held:
             self._slide_queued = False
+
+    def hold_slide(self):
+        """Ducken per Kamera – kommt wiederholt, solange der Spieler geduckt ist.
+        Die Figur rutscht, solange er unten bleibt, mindestens aber SLIDE_DUR.
+        Bleibt die Meldung SLIDE_HOLD_REFRESH lang aus, endet das Halten von selbst.
+        In der Luft: schnell nach unten fallen, Slide startet bei der Landung."""
+        if self._pb_timer > 0:
+            return
+        if self.is_jumping:
+            if not self._slide_queued:
+                self._queue_slide(held=True)
+            self._slide_queued_held = True
+        elif not self.is_sliding:
+            self._begin_slide(held=True)
+        else:
+            self.slide_held = True      # Mindestdauer zählt ab dem Abtauchen weiter
+        self._hold_left = SLIDE_HOLD_REFRESH
+
+    def release_slide(self):
+        """Spieler steht wieder auf (Kamera): Der Slide läuft noch bis SLIDE_DUR aus."""
+        self._release_hold()
+
+    def activate_power(self, name: str) -> bool:
+        """Power-up auslösen (Kamera-Haltung oder Taste). False, wenn Power-ups
+        abgeschaltet sind, es noch abklingt oder gerade nicht geht."""
+        if not GS.powerups or not self.state.alive or name not in POWERS:
+            return False
+        if name == 'glide' and self._pb_timer > 0:
+            return False                # beim Zurückstoßen gibt es keinen Sprung
+        if not self.state.powers.activate(name):
+            return False
+        if name == 'glide':
+            self._start_glide()
+        return True
 
     def action_stand(self):
         """Neutralpose-Signal (für Gestensteuerung).
@@ -211,6 +266,7 @@ class Player(Entity):
         self.is_sliding  = False
         self.slide_held  = False
         self.slide_timer = 0.0
+        self._hold_left  = None
         self.scale_y     = self._base_sy
         # In der Luft (geduckt vom Dach gefallen) nicht auf den Boden setzen –
         # der Fall läuft normal weiter
@@ -223,6 +279,31 @@ class Player(Entity):
         self._slide_queued      = True
         self._slide_queued_held = held
         self.vel_y = min(self.vel_y, -FAST_DROP_VEL)
+
+    def _release_hold(self):
+        self.slide_held         = False
+        self._slide_queued_held = False
+        self._hold_left         = None
+
+    def _start_glide(self):
+        """Gleitsprung: vom Boden, Dach oder der Rampe ab. In der Luft gibt es kurz
+        Auftrieb. Die geringere Schwerkraft liefert _gravity(), solange es wirkt."""
+        if self.is_sliding:
+            self._end_slide()
+        self._slide_queued = False
+        if self.is_jumping:
+            self.vel_y = max(self.vel_y, JUMP_VEL * 0.5)
+        else:
+            self.vel_y      = JUMP_VEL
+            self.is_jumping = True
+            self.platform   = None
+            self.ramp       = None
+
+    def _gravity(self) -> float:
+        """Schwerkraft – beim Gleiten schwächer: steigt höher und sinkt langsam."""
+        if self.state.powers.is_active('glide'):
+            return GRAVITY * (GLIDE_GRAVITY_UP if self.vel_y > 0 else GLIDE_GRAVITY_DOWN)
+        return GRAVITY
 
     def _apply_pending_lane(self):
         """Gemerkte Zielspur übernehmen, sobald möglich: nicht während des
@@ -253,9 +334,14 @@ class Player(Entity):
         for o in self.obstacles_ref:
             if o._dead or o.kind != 'train':
                 continue
+            if abs(o.x - target_x) >= o.hw + PLAYER_HW + 0.15:
+                continue
             if abs(o.z - self.z) < o.hz + 2.0:
-                if abs(o.x - target_x) < o.hw + PLAYER_HW + 0.15:
-                    return False
+                return False
+            # Rampe davor: seitlich nur betretbar, solange sie noch flach ist
+            surface = o.ramp_surface(self.z)
+            if surface is not None and surface > RAMP_STEP_MAX:
+                return False
         return True
 
     def half_extents(self):
@@ -268,20 +354,65 @@ class Player(Entity):
             return self.platform.y + self.platform.hh
         return None
 
-    def _floor(self) -> float:
-        """Mittelpunkt-Höhe im Stand: auf dem Dach (gleiche Formel wie bei der Landung) oder Boden."""
+    def _ramp_under(self):
+        """(Zug, Höhe) der Rampe direkt unter dem Spieler – oder None."""
+        found = None
+        for o in self.obstacles_ref:
+            if o._dead or not o.ramp_len or abs(o.x - self.x) >= o.hw:
+                continue
+            surface = o.ramp_surface(self.z)
+            if surface is not None and (found is None or surface > found[1]):
+                found = (o, surface)
+        return found
+
+    def _support_top(self):
+        """Oberkante unter dem Spieler: Dach (Plattform) oder Rampe – None = Boden."""
         top = self._platform_top()
         if top is not None:
-            return top + self.scale_y * PLAYER_HH
-        return self._base_y
+            return top
+        ramp = self._ramp_under()
+        return ramp[1] if ramp is not None else None
+
+    def _rest_y(self, top, sliding: bool) -> float:
+        """Mittelpunkt-Höhe auf einer Fläche mit Oberkante `top` (None = Boden),
+        stehend oder geduckt – gleiche Formel wie bei der Landung auf einem Dach."""
+        ground = self._base_y - self._base_sy * 0.27 if sliding else self._base_y
+        if top is None:
+            return ground
+        return max(ground, top + self.scale_y * PLAYER_HH)
+
+    def _floor(self) -> float:
+        """Mittelpunkt-Höhe im Stand: auf dem Dach, auf der Rampe oder am Boden."""
+        return self._rest_y(self._support_top(), sliding=False)
 
     def _slide_y(self) -> float:
-        """Mittelpunkt-Höhe geduckt. Auf einem Dach bleibt der Spieler oben,
-        statt auf Bodenhöhe in den Zug/das Auto zu rutschen (= Treffer)."""
-        top = self._platform_top()
-        if top is not None:
-            return top + self.scale_y * PLAYER_HH
-        return self._base_y - self._base_sy * 0.27
+        """Mittelpunkt-Höhe geduckt. Auf einem Dach oder einer Rampe bleibt der Spieler
+        oben, statt auf Bodenhöhe in den Zug/das Auto zu rutschen (= Treffer)."""
+        return self._rest_y(self._support_top(), sliding=True)
+
+    def _leave_ramp(self):
+        """Rampe zu Ende: oben angekommen → aufs Zugdach, seitlich runter → fallen."""
+        o, self.ramp = self.ramp, None
+        if (not o._dead and o.front_z <= self.z + 0.5
+                and abs(o.x - self.x) < o.hw + PLAYER_HW and o.z_overlaps(self.z, 0.0)):
+            self.platform = o
+            self.y = self._rest_y(o.roof_y, self.is_sliding)
+        else:
+            self.vel_y      = 0.0
+            self.is_jumping = True
+
+    def _update_fx(self):
+        """Power-up-Effekte ein-/ausblenden (Schild blinkt kurz vor dem Ende)."""
+        p = self.state.powers
+        left = p.active['shield']
+        self.shield_fx.enabled = left > 1.5 or (left > 0 and int(left * 6) % 2 == 0)
+        if self.shield_fx.enabled:
+            # Kugel trotz gestauchter Figur (Ducken) rund halten
+            self.shield_fx.scale = (1.7 / self.scale_x, 1.7 / self.scale_y, 1.7 / self.scale_z)
+        gliding = p.is_active('glide') and self.is_jumping
+        for wing in self.wings_fx:
+            wing.enabled = gliding
+        self.magnet_fx.enabled = p.is_active('magnet')
 
     # ── Update (Physik) ───────────────────────────────────────────────
 
@@ -292,6 +423,12 @@ class Player(Entity):
 
         # Blinken bei Unverwundbarkeit
         self.visible = (int(self.state.inv_timer * 8) % 2 == 0) if self.state.is_invincible() else True
+
+        # ── Ducken per Kamera: ohne neue Meldung endet das Halten ─────
+        if self._hold_left is not None:
+            self._hold_left -= dt
+            if self._hold_left <= 0:
+                self._release_hold()
 
         # ── Pushback-Z-Animation ──────────────────────────────────────
         if self._pb_timer > 0:
@@ -328,17 +465,31 @@ class Player(Entity):
                     self.vel_y      = 0.0
                     self.is_jumping = True   # Spieler fällt vom Zug
 
+        # ── Rampe: der Boden steigt unter den Füßen an ────────────────
+        # Oben angekommen geht es aufs Zugdach, seitlich runter heißt fallen
+        if self.platform is None and not self.is_jumping:
+            ramp = self._ramp_under()
+            if ramp is not None:
+                self.ramp = ramp[0]
+                self.y    = self._rest_y(ramp[1], self.is_sliding)
+            elif self.ramp is not None:
+                self._leave_ramp()
+
         # ── Sprung-Physik ─────────────────────────────────────────────
-        # Landung nur wenn FALLEND (vel_y <= 0) und auf/unter Boden
+        # Landung nur wenn FALLEND (vel_y <= 0) und auf/unter Boden bzw. Rampe
         if self.is_jumping:
-            self.vel_y += GRAVITY * dt
+            self.vel_y += self._gravity() * dt
             self.y     += self.vel_y * dt
-            if self.vel_y <= 0 and self.y <= self._base_y:
-                # Geduckt vom Dach gefallen → geduckt landen, nicht schweben
-                self.y          = self._slide_y() if self.is_sliding else self._base_y
-                self.vel_y      = 0.0
-                self.is_jumping = False
-                self.platform   = None
+            if self.vel_y <= 0:
+                ramp = self._ramp_under()
+                top  = ramp[1] if ramp is not None else None
+                if self.y <= self._rest_y(top, sliding=False):
+                    # Geduckt vom Dach gefallen → geduckt landen, nicht schweben
+                    self.y          = self._rest_y(top, self.is_sliding)
+                    self.vel_y      = 0.0
+                    self.is_jumping = False
+                    self.platform   = None
+                    self.ramp       = ramp[0] if ramp is not None else None
 
         # ── In der Luft gedrücktes Ducken bei der Landung starten ─────
         # (Landung auf dem Boden: oben; auf einem Dach: in _check_collisions)
@@ -348,9 +499,11 @@ class Player(Entity):
                 self._begin_slide(held=self._slide_queued_held)
 
         # ── Slide-Timer ───────────────────────────────────────────────
-        # Wenn Taste gehalten (slide_held), läuft der Timer nicht ab.
+        # Läuft immer mit, der Slide endet aber erst, wenn er nicht mehr gehalten
+        # wird (Taste / Kamera) – gehalten dauert er also mindestens SLIDE_DUR.
         if self.is_sliding:
-            if not self.slide_held:
-                self.slide_timer -= dt
-            if self.slide_timer <= 0:
+            self.slide_timer -= dt
+            if self.slide_timer <= 0 and not self.slide_held:
                 self._end_slide()
+
+        self._update_fx()

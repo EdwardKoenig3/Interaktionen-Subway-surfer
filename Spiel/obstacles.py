@@ -1,10 +1,10 @@
 import random
-from ursina import Entity, destroy, color as ursina_color
+from ursina import Entity, Mesh, destroy, color as ursina_color
 from constants import (
     LANES, LANE_COUNT, SPAWN_Z, DESPAWN_Z,
-    C_COIN, C_CAR, C_CABIN,
+    C_COIN, C_CAR, C_CABIN, C_RAMP,
     CAR_SX, CAR_SY, CAR_Y, CAR_CAB_TOP,
-    TRAIN_SX, TRAIN_SY, TRAIN_Y,
+    TRAIN_SX, TRAIN_SY, TRAIN_Y, TRAIN_TOP, RAMP_LEN,
     OVERHEAD_Y, OVERHEAD_SY,
     PLAYER_HW, PLAYER_HH,
 )
@@ -30,9 +30,10 @@ class Obstacle(Entity):
     """
     Generisches Hindernis: Auto (springbare Plattform), Zug (Wand – nur Spurwechsel),
     Deckenbalken (nur Slide). Zuglängen-Varianten: 'train', 'train_long', 'train_xl'.
+    Ein Zug mit `ramp=True` hat vorne eine Rampe, über die man aufs Dach läuft.
     """
 
-    def __init__(self, lane: int, kind: str):
+    def __init__(self, lane: int, kind: str, ramp: bool = False):
         base_kind = 'train' if kind.startswith('train') else kind
         d  = OBS_DEFS[base_kind]
 
@@ -41,10 +42,12 @@ class Obstacle(Entity):
             sz = random.uniform(lo, hi)
         else:
             sz = d['sz']
+        ramp_len = RAMP_LEN if ramp and base_kind == 'train' else 0.0
 
         # Vorderkante liegt bei SPAWN_Z (nicht die Mitte) – sonst tauchen lange
-        # Züge deutlich näher auf als kurze Hindernisse.
-        cz = SPAWN_Z + sz * 0.5
+        # Züge deutlich näher auf als kurze Hindernisse. Mit Rampe beginnt die
+        # Rampe dort, der Zug steht entsprechend weiter hinten.
+        cz = SPAWN_Z + ramp_len + sz * 0.5
 
         # Entity aufbauen — Auto = unsichtbarer Träger (texturierte Quads als _deco),
         # Train/Overhead = Würfel mit Wandtextur.
@@ -74,10 +77,13 @@ class Obstacle(Entity):
             self.hh       = (CAR_CAB_TOP - CAR_Y)
         self._dead        = False
         self.has_platform = base_kind in ('train', 'car')
+        self.ramp_len     = ramp_len         # 0 = keine Rampe
         self._deco: list[Entity] = []
 
         if base_kind == 'train':
             self._build_train(lane, sz, cz)
+            if ramp_len:
+                self._build_ramp(lane, cz - sz * 0.5)
         elif base_kind == 'overhead':
             self._build_overhead(lane, cz)
         elif base_kind == 'car':
@@ -101,6 +107,22 @@ class Obstacle(Entity):
                            scale=(0.45, 0.4, 0.5),
                            position=(LANES[lane] + side, TRAIN_Y + 0.3, fz))
                 self._deco.append(w)
+
+    def _build_ramp(self, lane: int, front_z: float):
+        """Holzrampe als Keil vor dem Zug: vorne auf dem Boden, hinten an der Dachkante."""
+        w, ln, h = TRAIN_SX / 2, self.ramp_len, TRAIN_TOP
+        # Schräge mit Bretter-Textur (Bretter quer zur Laufrichtung)
+        slope = Mesh(vertices=[(-w, 0, -ln), (w, 0, -ln), (w, h, 0), (-w, h, 0)],
+                     triangles=[0, 1, 2, 0, 2, 3],
+                     uvs=[(0, 0), (1, 0), (1, ln / 2), (0, ln / 2)])
+        sides = Mesh(vertices=[(-w, 0, -ln), (-w, h, 0), (-w, 0, 0),
+                               (w, 0, -ln), (w, 0, 0), (w, h, 0)],
+                     triangles=[0, 1, 2, 3, 4, 5])
+        # Direkt vor der Frontplatte des Zugs (die ragt 0.18 nach vorne)
+        pos = (LANES[lane], 0, front_z - 0.18)
+        self._deco.append(Entity(model=slope, texture='textures/ramp.png',
+                                 double_sided=True, position=pos))
+        self._deco.append(Entity(model=sides, color=C_RAMP, double_sided=True, position=pos))
 
     def _build_car(self, lane: int, sz: float, car_z: float):
         # Atlas-Layout (3×2, identisch zum Spieler):
@@ -194,3 +216,29 @@ class Obstacle(Entity):
         if abs(self.x - player.x) >= self.hw + phw - 0.05:
             return False
         return abs(self.y - player.y) < self.hh + phh - 0.1
+
+    # ── Rampe ────────────────────────────────────────────────────────
+
+    @property
+    def front_z(self) -> float:
+        """z der Vorderseite (zum Spieler hin)."""
+        return self.z - self.hz
+
+    @property
+    def roof_y(self) -> float:
+        """Oberkante als Lauffläche – dieselbe Höhe wie beim Landen aufs Dach."""
+        return self.y + self.hh
+
+    def ramp_surface(self, z: float) -> float | None:
+        """Höhe der Rampe bei z – None, wenn es keine gibt oder z nicht darüber liegt."""
+        if not self.ramp_len:
+            return None
+        start = self.front_z - self.ramp_len
+        if not (start <= z <= self.front_z):
+            return None
+        return self.roof_y * (z - start) / self.ramp_len
+
+    def ramp_contains(self, z: float, y: float, clearance: float) -> bool:
+        """Steckt ein Punkt (z.B. eine Münze) in der Rampe?"""
+        surface = self.ramp_surface(z)
+        return surface is not None and y < surface + clearance
